@@ -1,0 +1,183 @@
+<mvc:View
+    controllerName="timetracker.controller.View1"
+    xmlns="sap.m"
+    xmlns:mvc="sap.ui.core.mvc"
+    xmlns:core="sap.ui.core"
+    xmlns:f="sap.ui.layout.form"
+    xmlns:l="sap.ui.layout"
+    displayBlock="true">
+    <Shell>
+        <Page title="Maintenance Time Tracking" showHeader="true" class="sapUiContentPadding">
+            <headerContent>
+                <Button icon="sap-icon://filter" press=".onFilterPress" tooltip="Filters" />
+            </headerContent>
+            <content>
+                
+                <Panel
+                    expandable="true"
+                    expanded="true"
+                    backgroundDesign="Transparent"
+                    class="sapUiNoContentPadding"
+                    visible="{= ${drafts>/entries}.length > 0 }">
+                     <headerToolbar>
+                        <Toolbar>
+                            <Title text="Draft Entries ({= ${drafts>/entries}.length })"/>
+                        </Toolbar>
+                    </headerToolbar>
+                    <content>
+                        <List
+                            items="{drafts>/entries}"
+                            noDataText="No draft entries."
+                            showSeparators="None"
+                            backgroundDesign="Transparent"
+                            class="sapUiNoContentPadding">
+                            <CustomListItem class="{= ${drafta>posted} ? 'postedEntry' : '' }">
+                                <HBox class="savedEntryCard" alignItems="Center" justifyContent="SpaceBetween">
+                                    <HBox alignItems="Center">
+                                        <core:Icon size="2rem" src="sap-icon://save" class="sapUiMediumMarginEnd"/>
+                                        <VBox>
+                                            <Title text="Order: {drafts>orderId} / Op: {drafts>operationId}" level="H4"/>
+                                            <Text text="Duration: {drafts>formattedTime}" class="cardSubtitle"/>
+                                            <Text text="Error: {drafts>errorText}" class="sapUiErrorText" visible="{= !!${drafts>errorText} }"/>
+                                        </VBox>
+                                    </HBox>
+                                    <HBox>
+                                        <Button
+                                            text="Post"
+                                            type="Emphasized"
+                                            press=".onPostDraft"
+                                            class="sapUiTinyMarginEnd"
+                                            enabled="{= !${drafts>posted} }"/>
+                                        <Button
+                                            icon="sap-icon://delete"
+                                            type="Transparent"
+                                            press=".onDeleteDraft"
+                                            class="deleteButton"
+                                            enabled="{= !${drafts>posted} }"/>
+                                    </HBox>
+                                </HBox>
+                            </CustomListItem>
+                        </List>
+                    </content>
+                </Panel>
+                
+                
+                <Panel
+                    expandable="true"
+                    expanded="true"
+                    backgroundDesign="Transparent"
+                    class="sapUiNoContentPadding sapUiMediumMarginTop"
+                    visible="{viewState>/isProgressPanelVisible}">
+                    <headerToolbar>
+                        <Toolbar>
+                            <Title text="In Progress"/>
+                        </Toolbar>
+                    </headerToolbar>
+                    <content>
+                        <List
+                            id="inProgressList"
+                            items="{orders>/orders}"
+                            showSeparators="None"
+                            backgroundDesign="Transparent">
+                            <!-- This item is only visible when a timer is running -->
+                            <CustomListItem type="Active" press=".onSelectOrder" visible="{= ${orders>timerState/isRunning} === true }">
+                                <VBox class="customCard runningCard">
+                                    <!-- Card Header -->
+                                    <FlexBox justifyContent="SpaceBetween" alignItems="Start">
+                                        <HBox alignItems="Start">
+                                            <core:Icon
+                                                src="sap-icon://machine"
+                                                size="1.5rem"
+                                                class="sapUiMediumMarginEnd sapUiTinyMarginTop"/>
+                                            <VBox>
+                                                <Title text="{orders>orderDesc}" wrapping="true" level="H3"/>
+                                                <Text text="Order: {orders>orderId} / Op: {orders>operationId}" class="cardSubtitle"/>
+                                                <Text text="{orders>operationDesc}" wrapping="true" class="cardSubtitle"/>
+                                            </VBox>
+                                        </HBox>
+                                        <core:Icon src="sap-icon://shipping-status" color="#0a6ed1" size="1.5rem" class="sapUiTinyMarginBegin"/>
+                                    </FlexBox>
+                                    
+                                    <!-- Timer Panel is always visible for In Progress items -->
+                                    <VBox class="timer-container" alignItems="Center">
+                                        <Text text="{ path: 'orders>timerState/elapsedSeconds', formatter: '.formatTime' }" class="sapMNTDigitalClock runningClock" />
+                                        <Button text="Clock Out" type="Reject" icon="sap-icon://stop" press=".onClockOut" class="sapUiSmallMarginTop" />
+                                    </VBox>
+                                </VBox>
+                            </CustomListItem>
+                        </List>
+                    </content>
+                </Panel>
+
+                <!-- Section 3: Open Operations (was Section 2) -->
+                 <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop">
+                    <headerToolbar>
+                        <Toolbar>
+                            <Title text="Open Operations"/>
+                            <ToolbarSpacer/>
+                            <SearchField width="40%" liveChange=".onFilterOrders" placeholder="Filter..."/>
+                        </Toolbar>
+                    </headerToolbar>
+                    <content>
+                        <List
+                            id="ordersList"
+                            items="{orders>/orders}"
+                            showSeparators="None"
+                            backgroundDesign="Transparent">
+                            <!-- This item is only visible when a timer is NOT running -->
+                            <CustomListItem type="Active" press=".onSelectOrder" visible="{= !${orders>timerState/isRunning} }">
+                                <VBox class="customCard">
+                                    
+                                    <FlexBox justifyContent="SpaceBetween" alignItems="Start">
+                                        <HBox alignItems="Start">
+                                            <core:Icon
+                                                src="sap-icon://machine"
+                                                size="1.5rem"
+                                                class="sapUiMediumMarginEnd sapUiTinyMarginTop"/>
+                                            <VBox>
+                                                <Title text="{orders>orderDesc}" wrapping="true" level="H3"/>
+                                                <Text text="Order: {orders>orderId} / Op: {orders>operationId}" class="cardSubtitle"/>
+                                                <Text text="{orders>operationDesc}" wrapping="true" class="cardSubtitle"/>
+                                            </VBox>
+                                        </HBox>
+                                        <VBox alignItems="End" class="sapUiTinyMarginBegin">
+                                            <ObjectStatus text="{orders>systemStatus}"/>
+                                        </VBox>
+                                    </FlexBox>
+                                    
+                                    
+                                    <Panel
+                                        backgroundDesign="Transparent"
+                                        class="sapUiNoContentPadding"
+                                        visible="{= ${orders>orderId} === ${activeTimer>/activeOrderId} &amp;&amp; ${orders>operationId} === ${activeTimer>/activeOperationId} }">
+                                        
+                                        
+                                        <f:SimpleForm layout="ResponsiveGridLayout"
+                                            editable="false"
+                                            class="sapUiSmallMarginTop"
+                                            labelSpanL="4" labelSpanM="4" emptySpanL="0" emptySpanM="0"
+                                            columnsL="1" columnsM="1">
+                                            <core:Title text="Operation Details" />
+                                            <Label text="Work Center" />
+                                            <Text text="{orders>workCenter}" />
+                                            <Label text="Earliest Start" />
+                                            <Text text="{path: 'orders>reqStartDate', type: 'sap.ui.model.type.DateTime', formatOptions: { style: 'medium', source: { pattern: 'yyyy-MM-ddTHH:mm:ss' } } }" />
+                                            <Label text="Earliest Finish" />
+                                            <Text text="{path: 'orders>reqEndDate', type: 'sap.ui.model.type.DateTime', formatOptions: { style: 'medium', source: { pattern: 'yyyy-MM-ddTHH:mm:ss' } } }" />
+                                            <Label text="Actual Work" />
+                                            <Text text="{orders>actualWork}" />
+                                        </f:SimpleForm>
+                                        
+                                        <VBox class="timer-container-inactive" alignItems="Center">
+                                             <Button text="Clock In" type="Accept" icon="sap-icon://play" press=".onClockIn" class="sapUiSmallMarginTop" />
+                                        </VBox>
+                                    </Panel>
+                                </VBox>
+                            </CustomListItem>
+                        </List>
+                    </content>
+                </Panel>
+            </content>
+        </Page>
+    </Shell>
+</mvc:View>

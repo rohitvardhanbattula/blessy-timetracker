@@ -1,0 +1,55 @@
+<core:FragmentDefinition
+    xmlns="sap.m"
+    xmlns:core="sap.ui.core"
+    xmlns:f="sap.ui.layout.form"
+    xmlns:l="sap.ui.layout">
+    <Dialog title="Submit Time Confirmation" contentWidth="30rem">
+        <content>
+            <f:SimpleForm editable="true" layout="ResponsiveGridLayout"
+                labelSpanL="4" labelSpanM="4" emptySpanL="0" emptySpanM="0"
+                columnsL="1" columnsM="1">
+                
+                <Label text="Work Start" required="true"/>
+                <DateTimePicker
+                    id="workStartDate"
+                    value="{path: 'dialog>/workStartDate', type: 'sap.ui.model.type.DateTime'}"
+                    displayFormat="medium"
+                    valueFormat="yyyy-MM-ddTHH:mm:ss"/>
+                
+                <Label text="Work Finish" required="true"/>
+                <DateTimePicker
+                    id="workFinishDate"
+                    value="{path: 'dialog>/workFinishDate', type: 'sap.ui.model.type.DateTime'}"
+                    displayFormat="medium"
+                    valueFormat="yyyy-MM-ddTHH:mm:ss"/>
+
+                <Label text="Actual Work" required="true"/>
+                <Input
+                    id="actualWorkInput"
+                    value="{dialog>/actualWork}"
+                    description="Hours (e.g., 1.5)"
+                    type="Number"
+                    width="100%"/>
+                
+                <Label text="Confirmation Text"/>
+                <Input
+                    id="confTextInput"
+                    value="{dialog>/confirmationText}"
+                    maxLength="40"
+                    placeholder="Enter short text (max 40 char)"/>
+                
+                <Label text="Final Confirmation"/>
+                <CheckBox
+                    id="finalConfCheckBox"
+                    selected="{dialog>/isFinalConfirmation}" />
+            </f:SimpleForm>
+        </content>
+        <beginButton>
+            <Button text="Submit" type="Emphasized" press=".onSubmitConfirmation" />
+        </beginButton>
+        <endButton>
+            <Button text="Cancel" press=".onCloseDialog" />
+        </endButton>
+    </Dialog>
+</core:FragmentDefinition>
+
