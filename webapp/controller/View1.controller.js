@@ -580,7 +580,7 @@ sap.ui.define([
                 if (data.RETURN && data.RETURN.TYPE === "S") {
                     MessageToast.show("Confirmation posted successfully!");
                     that.updateTimeEntryOnServer(oData.timeEntryId, null, null, "POSTED");
-                    that.removeOrderFromList(oData.orderId, oData.operationId);
+                    // Order remains in list - no removal
                     that.onCloseDialog();
                 } else {
                     var sErrorMsg = data.RETURN ? data.RETURN.MESSAGE : "Unknown error";
@@ -605,16 +605,6 @@ sap.ui.define([
             var month = ("0" + (d.getMonth() + 1)).slice(-2);
             var day = ("0" + d.getDate()).slice(-2);
             return year + "-" + month + "-" + day;
-        },
-
-        // Remove order from list after posting
-        removeOrderFromList: function(sOrderId, sOperationId) {
-            var oOrdersModel = this.getOwnerComponent().getModel("orders");
-            var aOrders = oOrdersModel.getProperty("/orders");
-            var aNewOrders = aOrders.filter(function(order) {
-                return !(order.orderId === sOrderId && order.operationId === sOperationId);
-            });
-            oOrdersModel.setProperty("/orders", aNewOrders);
         },
 
         // Save entry to drafts
