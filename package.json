@@ -14,6 +14,7 @@
   },
   "scripts": {
     "start": "fiori run --open \"test/flpSandbox.html?sap-ui-xx-viewCache=false#timetracker-display\"",
+    "appid": "fiori run --open \"test/flpSandbox.html?sap-ui-xx-viewCache=false#timetracker-display\" -- --host 0.0.0.0",
     "start-local": "fiori run --config ./ui5-local.yaml --open \"test/flpSandbox.html?sap-ui-xx-viewCache=false#timetracker-display\"",
     "build": "ui5 build --config=ui5.yaml --clean-dest --dest dist",
     "deploy": "fiori verify",
