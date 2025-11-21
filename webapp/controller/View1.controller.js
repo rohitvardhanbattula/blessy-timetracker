@@ -16,39 +16,24 @@ sap.ui.define([
         sHanaServiceUrl: "/hana/time-entries",
 
         onInit: function () {
-            // Busy model for busy indicator control
             var oBusyModel = new JSONModel({ busy: false });
             this.getView().setModel(oBusyModel, "busy");
 
-            // Initialize models
-            var oActiveTimerModel = new JSONModel({
-                activeOrderId: null,
-                activeOperationId: null
-            });
+            var oActiveTimerModel = new JSONModel({ activeOrderId: null, activeOperationId: null });
             this.getView().setModel(oActiveTimerModel, "activeTimer");
 
             var oDialogModel = new JSONModel({
-                orderId: null,
-                operationId: null,
-                workStartDate: null,
-                workFinishDate: null,
-                actualWork: "0.0",
-                confirmationText: "",
-                isFinalConfirmation: false,
-                contextPath: null,
-                timeEntryId: null
+                orderId: null, operationId: null, workStartDate: null, workFinishDate: null,
+                actualWork: "0.0", confirmationText: "", isFinalConfirmation: false, contextPath: null, timeEntryId: null
             });
             this.getView().setModel(oDialogModel, "dialog");
 
-            var oViewStateModel = new JSONModel({
-                isProgressPanelVisible: false
-            });
+            var oViewStateModel = new JSONModel({ isProgressPanelVisible: false });
             this.getOwnerComponent().setModel(oViewStateModel, "viewState");
 
             var oDraftsModel = new JSONModel({ entries: [] });
             this.getOwnerComponent().setModel(oDraftsModel, "drafts");
 
-            // Load initial data without filter
             this.loadOrdersAndTimeEntries();
         },
 
@@ -58,241 +43,173 @@ sap.ui.define([
         },
 
         formatTime: function (iTotalSeconds) {
-            if (iTotalSeconds === null || iTotalSeconds === undefined) {
-                return "00:00:00";
-            }
-            var hours = Math.floor(iTotalSeconds / 3600);
-            var minutes = Math.floor((iTotalSeconds - (hours * 3600)) / 60);
-            var seconds = iTotalSeconds - (hours * 3600) - (minutes * 60);
-            if (hours < 10) { hours = "0" + hours; }
-            if (minutes < 10) { minutes = "0" + minutes; }
-            if (seconds < 10) { seconds = "0" + seconds; }
-            return hours + ':' + minutes + ':' + seconds;
+            if (iTotalSeconds === null || iTotalSeconds === undefined) return "00:00:00";
+            let h = Math.floor(iTotalSeconds / 3600);
+            let m = Math.floor((iTotalSeconds % 3600) / 60);
+            let s = iTotalSeconds % 60;
+            return [h, m, s].map(v => (v < 10 ? "0" : "") + v).join(':');
         },
 
-        loadOrdersAndTimeEntries: function () {
-            var that = this;
+        async loadOrdersAndTimeEntries() {
             this.getView().getModel("busy").setProperty("/busy", true);
+            try {
+                const aOrders = await this.fetchOrders();
+                let oOrdersModel = new JSONModel({ orders: [] });
+                this.getOwnerComponent().setModel(oOrdersModel, "orders");
 
-            this.fetchOrders().then(function (aOrders) {
-                var oOrdersModel = new JSONModel({ orders: aOrders });
-                that.getOwnerComponent().setModel(oOrdersModel, "orders");
+                const aOrderIDs = aOrders.map(o => o.orderid);
 
-                that.fetchActiveTimeEntries().then(function (aTimeEntries) {
-                    that.mergeTimeEntriesWithOrders(aTimeEntries);
-                    that._startGlobalTimerInterval();
-                    that._updatePanelVisibility();
-                    that.getView().getModel("busy").setProperty("/busy", false);
-                }).catch(function () {
-                    that.getView().getModel("busy").setProperty("/busy", false);
-                });
+                // Parallel fetch all operations for each order
+                const aOperationsLists = await Promise.all(aOrderIDs.map(id => this.fetchOperations(id)));
 
-            }).catch(function () {
-                that.getView().getModel("busy").setProperty("/busy", false);
-            });
-        },
+                // Compile orders with at least one operation
+                const aFlatOrders = [];
 
-        loadOrdersAndTimeEntriesFiltered: function (sOrderIdFilter) {
-            var that = this;
-            this.getView().getModel("busy").setProperty("/busy", true);
-
-            this.fetchOrders(sOrderIdFilter).then(function (aOrders) {
-                var oOrdersModel = new JSONModel({ orders: aOrders });
-                that.getOwnerComponent().setModel(oOrdersModel, "orders");
-
-                that.fetchActiveTimeEntries().then(function (aTimeEntries) {
-                    that.mergeTimeEntriesWithOrders(aTimeEntries);
-                    that._startGlobalTimerInterval();
-                    that._updatePanelVisibility();
-                    that.getView().getModel("busy").setProperty("/busy", false);
-                }).catch(function () {
-                    that.getView().getModel("busy").setProperty("/busy", false);
-                });
-
-            }).catch(function () {
-                that.getView().getModel("busy").setProperty("/busy", false);
-            });
-        },
-
-        fetchOrders: function (sOrderIdFilter) {
-            var that = this;
-            return new Promise(function (resolve) {
-                var sUrl = "/sap/bc/zfmcall/BAPI_ALM_ORDERHEAD_GET_LIST?saml2=disabled&format=json";
-
-                var aRanges = [
-                    {
-                        "FIELD_NAME": "OPTIONS_FOR_DOC_TYPE",
-                        "SIGN": "I",
-                        "OPTION": "EQ",
-                        "LOW_VALUE": "EREF"
-                    },
-                    {
-                        "FIELD_NAME": "SHOW_DOCUMENTS_IN_PROCESS",
-                        "SIGN": "I",
-                        "OPTION": "EQ",
-                        "LOW_VALUE": "X"
-                    },
-                    {
-                        "FIELD_NAME": "SHOW_OPEN_DOCUMENTS"
-                    },
-                    {
-                        "FIELD_NAME": "SHOW_DOCS_WITH_FROM_DATE",
-                        "SIGN": "I",
-                        "OPTION": "EQ"
-                    },
-                    {
-                        "FIELD_NAME": "SHOW_DOCS_WITH_TO_DATE",
-                        "SIGN": "I",
-                        "OPTION": "EQ",
-                        "LOW_VALUE": "99991231"
+                aOrders.forEach((oOrder, idx) => {
+                    const ops = aOperationsLists[idx] || [];
+                    if (ops.length > 0) {
+                        ops.forEach(oOp => {
+                            aFlatOrders.push({
+                                orderId: oOrder.orderid,
+                                orderDesc: oOrder.short_text,
+                                operationId: oOp.activity,
+                                operationDesc: oOp.description,
+                                workCenter: oOp.work_cntr,
+                                systemStatus: oOp.s_status,
+                                reqStartDate: oOp.earl_sched_start_date + "T" + oOp.earl_sched_start_time,
+                                reqEndDate: oOp.earl_sched_finish_date + "T" + oOp.earl_sched_finish_time,
+                                assignedTo: oOp.resp_planner || oOrder.plangroup || "",
+                                activityType: oOp.acttype || "",
+                                timerState: {
+                                    elapsedSeconds: 0,
+                                    baseElapsedSeconds: 0,
+                                    isRunning: false,
+                                    clockInTime: null,
+                                    timeEntryId: null
+                                }
+                            });
+                        });
                     }
-                ];
+                });
 
+                oOrdersModel.setProperty("/orders", aFlatOrders);
+
+                const aTimeEntries = await this.fetchActiveTimeEntries();
+                this.mergeTimeEntriesWithOrders(aTimeEntries);
+                this._startGlobalTimerInterval();
+                this._updatePanelVisibility();
+            } catch (err) {
+                MessageBox.error("Error loading orders and operations: " + err.message);
+            } finally {
+                this.getView().getModel("busy").setProperty("/busy", false);
+            }
+        },
+
+        async loadOrdersAndTimeEntriesFiltered(sOrderIdFilter) {
+            this.getView().getModel("busy").setProperty("/busy", true);
+            try {
+                const aOrders = await this.fetchOrders(sOrderIdFilter);
+                let oOrdersModel = new JSONModel({ orders: [] });
+                this.getOwnerComponent().setModel(oOrdersModel, "orders");
+
+                const aOrderIDs = aOrders.map(o => o.orderid);
+
+                const aOperationsLists = await Promise.all(aOrderIDs.map(id => this.fetchOperations(id)));
+
+                const aFlatOrders = [];
+                aOrders.forEach((oOrder, idx) => {
+                    const ops = aOperationsLists[idx] || [];
+                    if (ops.length > 0) {
+                        ops.forEach(oOp => {
+                            aFlatOrders.push({
+                                orderId: oOrder.orderid,
+                                orderDesc: oOrder.short_text,
+                                operationId: oOp.activity,
+                                operationDesc: oOp.description,
+                                workCenter: oOp.work_cntr,
+                                systemStatus: oOp.s_status,
+                                reqStartDate: oOp.earl_sched_start_date + "T" + oOp.earl_sched_start_time,
+                                reqEndDate: oOp.earl_sched_finish_date + "T" + oOp.earl_sched_finish_time,
+                                assignedTo: oOp.resp_planner || oOrder.plangroup || "",
+                                activityType: oOp.acttype || "",
+                                timerState: {
+                                    elapsedSeconds: 0,
+                                    baseElapsedSeconds: 0,
+                                    isRunning: false,
+                                    clockInTime: null,
+                                    timeEntryId: null
+                                }
+                            });
+                        });
+                    }
+                });
+
+                oOrdersModel.setProperty("/orders", aFlatOrders);
+
+                const aTimeEntries = await this.fetchActiveTimeEntries();
+                this.mergeTimeEntriesWithOrders(aTimeEntries);
+                this._startGlobalTimerInterval();
+                this._updatePanelVisibility();
+            } catch (err) {
+                MessageBox.error("Error loading filtered orders and operations: " + err.message);
+            } finally {
+                this.getView().getModel("busy").setProperty("/busy", false);
+            }
+        },
+
+        async fetchOrders(sOrderIdFilter) {
+            try {
+                const sUrl = "/sap/bc/zfmcall/BAPI_ALM_ORDERHEAD_GET_LIST?saml2=disabled&format=json";
+                let aRanges = [
+                    { "FIELD_NAME": "OPTIONS_FOR_DOC_TYPE", "SIGN": "I", "OPTION": "EQ", "LOW_VALUE": "EREF" },
+                    { "FIELD_NAME": "SHOW_DOCUMENTS_IN_PROCESS", "SIGN": "I", "OPTION": "EQ", "LOW_VALUE": "X" },
+                    { "FIELD_NAME": "SHOW_OPEN_DOCUMENTS" },
+                    { "FIELD_NAME": "SHOW_DOCS_WITH_FROM_DATE", "SIGN": "I", "OPTION": "EQ" },
+                    { "FIELD_NAME": "SHOW_DOCS_WITH_TO_DATE", "SIGN": "I", "OPTION": "EQ", "LOW_VALUE": "99991231" }
+                ];
                 if (sOrderIdFilter && sOrderIdFilter.length > 0) {
                     aRanges.push({
                         "FIELD_NAME": "OPTIONS_FOR_ORDERID",
                         "SIGN": "I",
-                        "OPTION": "CP", // contains pattern
+                        "OPTION": "CP",
                         "LOW_VALUE": "*" + sOrderIdFilter + "*"
                     });
                 }
-
-                var oPayload = {
-                    "DISPLAY_PARAMETERS": {
-                        "PAGE_LENGTH": 50
-                    },
-                    "IT_RANGES": aRanges
-                };
-
-                fetch(sUrl, {
+                const oPayload = { "DISPLAY_PARAMETERS": { "PAGE_LENGTH": 50 }, "IT_RANGES": aRanges };
+                const response = await fetch(sUrl, {
                     method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(oPayload)
-                })
-                    .then(function (response) {
-                        return response.json();
-                    })
-                    .then(function (data) {
-                        var aOrders = data.et_result || [];
-
-                        if (aOrders.length === 0) {
-                            MessageToast.show("No orders found");
-                            resolve([]);
-                            return;
-                        }
-
-                        var aOrdersPromises = aOrders.map(function (order) {
-                            return that.fetchOperations(order.orderid);
-                        });
-
-                        Promise.all(aOrdersPromises).then(function (aAllOperations) {
-                            var aFlatOrders = [];
-
-                            aAllOperations.forEach(function (aOps, idx) {
-                                var oOrder = aOrders[idx];
-
-                                if (aOps.length === 0) {
-                                    aFlatOrders.push({
-                                        orderId: oOrder.orderid,
-                                        orderDesc: oOrder.short_text,
-                                        operationId: "----",
-                                        operationDesc: "No operations",
-                                        workCenter: oOrder.mn_wk_ctr || "",
-                                        systemStatus: oOrder.s_status,
-                                        reqStartDate: oOrder.start_date + "T07:00:00",
-                                        reqEndDate: oOrder.finish_date + "T07:00:00",
-                                        assignedTo: "",
-                                        activityType: "",
-                                        timerState: {
-                                            elapsedSeconds: 0,
-                                            baseElapsedSeconds: 0,
-                                            isRunning: false,
-                                            clockInTime: null,
-                                            timeEntryId: null
-                                        }
-                                    });
-                                } else {
-                                    aOps.forEach(function (oOp) {
-                                        aFlatOrders.push({
-                                            orderId: oOrder.orderid,
-                                            orderDesc: oOrder.short_text,
-                                            operationId: oOp.activity,
-                                            operationDesc: oOp.description,
-                                            workCenter: oOp.work_cntr,
-                                            systemStatus: oOp.s_status,
-                                            reqStartDate: oOp.earl_sched_start_date + "T" + oOp.earl_sched_start_time,
-                                            reqEndDate: oOp.earl_sched_finish_date + "T" + oOp.earl_sched_finish_time,
-                                            assignedTo: oOp.resp_planner || oOrder.plangroup || "",
-                                            activityType: oOp.acttype || "",
-                                            timerState: {
-                                                elapsedSeconds: 0,
-                                                baseElapsedSeconds: 0,
-                                                isRunning: false,
-                                                clockInTime: null,
-                                                timeEntryId: null
-                                            }
-                                        });
-                                    });
-                                }
-                            });
-
-                            resolve(aFlatOrders);
-                        });
-                    })
-                    .catch(function (error) {
-                        MessageBox.error("Failed to load orders: " + error.message);
-                        resolve([]);
-                    });
-            });
+                });
+                const data = await response.json();
+                return data.et_result || [];
+            } catch (error) {
+                MessageBox.error("Failed to load orders: " + (error.message || error));
+                return [];
+            }
         },
 
-        fetchOperations: function (sOrderId) {
-            var that = this;
-            return new Promise(function (resolve) {
-                var sUrl = "/sap/bc/zfmcall/BAPI_ALM_ORDEROPER_GET_LIST?format=json";
-                var oPayload = {
-                    "DISPLAY_PARAMETERS": {
-                        "PAGE_LENGTH": 25, // Limit to 25 operations only
-                        "CURRENT_PAGE": 1
-                    },
+        async fetchOperations(sOrderId) {
+            try {
+                const sUrl = "/sap/bc/zfmcall/BAPI_ALM_ORDEROPER_GET_LIST?format=json";
+                const oPayload = {
+                    "DISPLAY_PARAMETERS": { "PAGE_LENGTH": 25, "CURRENT_PAGE": 1 },
                     "IT_RANGES": [
-                        {
-                            "FIELD_NAME": "OPTIONS_FOR_ORDERID",
-                            "SIGN": "I",
-                            "OPTION": "EQ",
-                            "LOW_VALUE": sOrderId,
-                            "HIGH_VALUE": ""
-                        },
-                        {
-                            "FIELD_NAME": "SHOW_OPEN_DOCUMENTS",
-                            "SIGN": "I",
-                            "OPTION": "EQ",
-                            "LOW_VALUE": "X",
-                            "HIGH_VALUE": ""
-                        }
+                        { "FIELD_NAME": "OPTIONS_FOR_ORDERID", "SIGN": "I", "OPTION": "EQ", "LOW_VALUE": sOrderId, "HIGH_VALUE": "" },
+                        { "FIELD_NAME": "SHOW_OPEN_DOCUMENTS", "SIGN": "I", "OPTION": "EQ", "LOW_VALUE": "X", "HIGH_VALUE": "" }
                     ]
                 };
-
-                fetch(sUrl, {
+                const response = await fetch(sUrl, {
                     method: "POST",
-                    headers: {
-                        "Content-Type": "application/json"
-                    },
+                    headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(oPayload)
-                })
-                    .then(function (response) {
-                        return response.json();
-                    })
-                    .then(function (data) {
-                        resolve(data.et_result || []);
-                    })
-                    .catch(function (error) {
-                        console.error("Failed to fetch operations for order " + sOrderId, error);
-                        resolve([]);
-                    });
-            });
+                });
+                const data = await response.json();
+                return data.et_result || [];
+            } catch (error) {
+                console.error("Failed to fetch operations for order " + sOrderId, error);
+                return [];
+            }
         },
 
         fetchActiveTimeEntries: function () {
@@ -413,21 +330,25 @@ sap.ui.define([
         },
 
         onFilterOrders: function (oEvent) {
+            var that = this;
+
+            // Get the current query string fresh for this event
             var sQuery = oEvent.getParameter("newValue");
+            if (sQuery) sQuery = sQuery.trim();
 
             if (this._filterDebounceTimer) {
                 clearTimeout(this._filterDebounceTimer);
             }
 
-            var that = this;
             this._filterDebounceTimer = setTimeout(function () {
-                if (!sQuery) {
+                if (!sQuery || sQuery.length < 3) { 
                     that.loadOrdersAndTimeEntries();
                 } else {
                     that.loadOrdersAndTimeEntriesFiltered(sQuery);
                 }
-            }, 400);
-        },
+            }, 400); 
+        }
+        ,
 
         onRefreshOrders: function () {
             MessageToast.show("Refreshing orders...");
