@@ -6,12 +6,17 @@
     xmlns:f="sap.ui.layout.form"
     displayBlock="true">
     <Shell>
-        <Page title="Maintenance Time Tracking" showHeader="true" class="sapUiContentPadding">
+        <Page
+            id="mainPage"
+            title="Maintenance Time Tracking"
+            showHeader="true"
+            class="sapUiContentPadding"
+            busy="{busy>/busy}">
             <headerContent>
                 <Button icon="sap-icon://refresh" press=".onRefreshOrders" tooltip="Refresh Orders" />
             </headerContent>
             <content>
-                
+
                 <!-- Draft Entries Panel -->
                 <Panel
                     expandable="true"
@@ -23,41 +28,41 @@
                         <Toolbar>
                             <Title text="Draft Entries ({= ${drafts>/entries}.length })"/>
                         </Toolbar>
-                    </headerToolbar>
-                    <content>
-                        <List
-                            items="{drafts>/entries}"
-                            noDataText="No draft entries."
-                            showSeparators="None"
-                            backgroundDesign="Transparent">
-                            <CustomListItem>
-                                <HBox class="savedEntryCard" alignItems="Center" justifyContent="SpaceBetween">
-                                    <HBox alignItems="Center">
-                                        <core:Icon size="2rem" src="sap-icon://save" class="sapUiMediumMarginEnd"/>
-                                        <VBox>
-                                            <Title text="ACT: {drafts>operationId} - {drafts>operationDesc}" level="H4"/>
-                                            <Text text="ORD: {path: 'drafts>orderId', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
-                                            <Text text="Duration: {drafts>formattedTime}" class="cardSubtitle"/>
-                                            <Text text="Error: {drafts>errorText}" class="sapUiErrorText" visible="{= !!${drafts>errorText} }"/>
-                                        </VBox>
-                                    </HBox>
-                                    <HBox>
-                                        <Button
-                                            text="Post"
-                                            type="Emphasized"
-                                            press=".onPostDraft"
-                                            class="sapUiTinyMarginEnd"/>
-                                        <Button
-                                            icon="sap-icon://delete"
-                                            type="Transparent"
-                                            press=".onDeleteDraft"/>
-                                    </HBox>
-                                </HBox>
-                            </CustomListItem>
-                        </List>
-                    </content>
+                     </headerToolbar>
+                     <content>
+                         <List
+                             items="{drafts>/entries}"
+                             noDataText="No draft entries."
+                             showSeparators="None"
+                             backgroundDesign="Transparent">
+                             <CustomListItem>
+                                 <HBox class="savedEntryCard" alignItems="Center" justifyContent="SpaceBetween">
+                                     <HBox alignItems="Center">
+                                         <core:Icon size="2rem" src="sap-icon://save" class="sapUiMediumMarginEnd"/>
+                                         <VBox>
+                                             <Title text="ACT: {drafts>operationId} - {drafts>operationDesc}" level="H4"/>
+                                             <Text text="ORD: {path: 'drafts>orderId', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
+                                             <Text text="Duration: {drafts>formattedTime}" class="cardSubtitle"/>
+                                             <Text text="Error: {drafts>errorText}" class="sapUiErrorText" visible="{= !!${drafts>errorText} }"/>
+                                         </VBox>
+                                     </HBox>
+                                     <HBox>
+                                         <Button
+                                             text="Post"
+                                             type="Emphasized"
+                                             press=".onPostDraft"
+                                             class="sapUiTinyMarginEnd"/>
+                                         <Button
+                                             icon="sap-icon://delete"
+                                             type="Transparent"
+                                             press=".onDeleteDraft"/>
+                                     </HBox>
+                                 </HBox>
+                             </CustomListItem>
+                         </List>
+                     </content>
                 </Panel>
-                
+
                 <!-- In Progress Panel -->
                 <Panel
                     expandable="true"
@@ -107,9 +112,9 @@
                  <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop">
                     <headerToolbar>
                         <Toolbar>
-                            <Title text="Open Operations ({= ${orders>/orders}.length})"/>
+                            <Title text="Open Operations"/>
                             <ToolbarSpacer/>
-                            <SearchField width="40%" liveChange=".onFilterOrders" placeholder="Search..."/>
+                            <SearchField width="40%" liveChange=".onFilterOrders" placeholder="OrderID"/>
                         </Toolbar>
                     </headerToolbar>
                     <content>
@@ -128,7 +133,6 @@
                                             <VBox>
                                                 <Title text="ACT: {orders>operationId} - {orders>operationDesc}" wrapping="true" level="H3"/>
                                                 <Text text="ORD: {path: 'orders>orderId', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
-                                                
                                             </VBox>
                                         </HBox>
                                         <VBox alignItems="End">
@@ -157,7 +161,7 @@
                                         </f:SimpleForm>
                                         
                                         <VBox class="timer-container-inactive" alignItems="Center">
-                                             <Button text="Clock In" type="Accept" icon="sap-icon://play" press=".onClockIn" class="sapUiSmallMarginTop" />
+                                            <Button text="Clock In" type="Accept" icon="sap-icon://play" press=".onClockIn" class="sapUiSmallMarginTop" />
                                         </VBox>
                                     </Panel>
                                 </VBox>
