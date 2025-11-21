@@ -53,14 +53,7 @@
       "cozy": true
     },
     "models": {
-      "orders": {
-                "type": "sap.ui.model.json.JSONModel",
-                "uri": "model/orders.json"
-            },
-            "savedEntries": {
-                "type": "sap.ui.model.json.JSONModel",
-                "uri": "model/savedEntries.json"
-            },
+      
       "i18n": {
         "type": "sap.ui.model.resource.ResourceModel",
         "settings": {

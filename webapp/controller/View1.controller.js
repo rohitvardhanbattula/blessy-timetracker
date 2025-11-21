@@ -329,25 +329,24 @@ sap.ui.define([
             oViewStateModel.setProperty("/isProgressPanelVisible", bIsVisible);
         },
 
-        onFilterOrders: function (oEvent) {
-            var that = this;
+        onSearchOrders: function (oEvent) {
+    var that = this;
+    var oSearchField = this.byId("orderIdSearch"); 
+    var sQuery = oSearchField ? oSearchField.getValue().trim() : "";
 
-            // Get the current query string fresh for this event
-            var sQuery = oEvent.getParameter("newValue");
-            if (sQuery) sQuery = sQuery.trim();
+    if (this._filterDebounceTimer) {
+        clearTimeout(this._filterDebounceTimer);
+    }
 
-            if (this._filterDebounceTimer) {
-                clearTimeout(this._filterDebounceTimer);
-            }
-
-            this._filterDebounceTimer = setTimeout(function () {
-                if (!sQuery || sQuery.length < 3) { 
-                    that.loadOrdersAndTimeEntries();
-                } else {
-                    that.loadOrdersAndTimeEntriesFiltered(sQuery);
-                }
-            }, 400); 
+    this._filterDebounceTimer = setTimeout(function () {
+        if (!sQuery || sQuery.length < 3) { 
+            that.loadOrdersAndTimeEntries();
+        } else {
+            that.loadOrdersAndTimeEntriesFiltered(sQuery);
         }
+    }, 400); 
+}
+
         ,
 
         onRefreshOrders: function () {
