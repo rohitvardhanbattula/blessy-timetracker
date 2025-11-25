@@ -18,8 +18,8 @@ server:
             url: https://bmd.bye.hec.ondemand.com
             client: "800"
             authenticationType: BasicAuthentication
-            username: RBATTULA
-            password: Vardhan#123
+            username: GMODUGULA
+            password: PMCons@2025Q3
     - name: fiori-tools-appreload
       afterMiddleware: compression
       configuration:

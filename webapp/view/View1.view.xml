@@ -1,6 +1,6 @@
 <mvc:View controllerName="timetracker.controller.View1"
-    xmlns="sap.m"
     xmlns:mvc="sap.ui.core.mvc"
+    xmlns="sap.m"
     xmlns:core="sap.ui.core"
     xmlns:f="sap.ui.layout.form" displayBlock="true">
     <Shell>
@@ -24,8 +24,8 @@
                                     <HBox alignItems="Center">
                                         <core:Icon size="2rem" src="sap-icon://save" class="sapUiMediumMarginEnd"/>
                                         <VBox>
-                                            <Title text="ACT: {drafts>operationId} - {drafts>operationDesc}" level="H4"/>
-                                            <Text text="ORD: {path: 'drafts>orderId', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
+                                            <Title text="ACT: {drafts>OperationSO}" level="H4"/>
+                                            <Text text="ORD: {path: 'drafts>OrderID', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
                                             <Text text="Duration: {drafts>formattedTime}" class="cardSubtitle"/>
                                             <Text text="Error: {drafts>errorText}" class="sapUiErrorText" visible="{= !!${drafts>errorText} }"/>
                                         </VBox>
@@ -90,7 +90,6 @@
                         <List id="ordersList" items="{orders>/orders}" noDataText="No open operations" showSeparators="None" backgroundDesign="Transparent">
                             <CustomListItem type="Active" press=".onSelectOrder" visible="{= !${orders>timerState/isRunning} }">
                                 <VBox class="customCard">
-
                                     <FlexBox justifyContent="SpaceBetween" alignItems="Start">
                                         <HBox alignItems="Start">
                                             <core:Icon src="sap-icon://machine" size="1.5rem" class="sapUiMediumMarginEnd sapUiTinyMarginTop"/>
@@ -106,7 +105,6 @@
 
                                     <!-- Operation Details Panel -->
                                     <Panel backgroundDesign="Transparent" class="sapUiNoContentPadding" visible="{= ${orders>orderId} === ${activeTimer>/activeOrderId} &amp;&amp; ${orders>operationId} === ${activeTimer>/activeOperationId} }">
-
                                         <f:SimpleForm layout="ResponsiveGridLayout" editable="false" class="sapUiSmallMarginTop" labelSpanL="4" labelSpanM="4" emptySpanL="0" emptySpanM="0" columnsL="1" columnsM="1">
                                             <core:Title text="Operation Details" />
                                             <Label text="Activity Type" />
