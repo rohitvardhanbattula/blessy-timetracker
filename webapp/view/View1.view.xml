@@ -10,7 +10,6 @@
             </headerContent>
             <content>
 
-                <!-- Draft Entries Panel -->
                 <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding" visible="{= ${drafts>/entries}.length > 0 }">
                     <headerToolbar>
                         <Toolbar>
@@ -40,7 +39,6 @@
                     </content>
                 </Panel>
 
-                <!-- In Progress Panel -->
                 <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop" visible="{viewState>/isProgressPanelVisible}">
                     <headerToolbar>
                         <Toolbar>
@@ -48,8 +46,12 @@
                         </Toolbar>
                     </headerToolbar>
                     <content>
-                        <List id="inProgressList" items="{orders>/orders}" showSeparators="None" backgroundDesign="Transparent">
-                            <CustomListItem type="Active" press=".onSelectOrder" visible="{= ${orders>timerState/isRunning} === true }">
+                        <List 
+                            id="inProgressList" 
+                            items="{orders>/orders}" 
+                            showSeparators="None" 
+                            backgroundDesign="Transparent">
+                            <CustomListItem type="Active" press=".onSelectOrder" visible="{orders>timerState/isRunning}">
                                 <VBox class="customCard runningCard">
                                     <FlexBox justifyContent="SpaceBetween" alignItems="Start">
                                         <HBox alignItems="Start">
@@ -65,7 +67,6 @@
                                         </VBox>
                                     </FlexBox>
 
-                                    <!-- Timer Display -->
                                     <VBox class="timer-container" alignItems="Center">
                                         <Text text="{ path: 'orders>timerState/elapsedSeconds', formatter: '.formatTime' }" class="sapMNTDigitalClock runningClock" />
                                         <Button text="Clock Out" type="Reject" icon="sap-icon://stop" press=".onClockOut" class="sapUiSmallMarginTop" />
@@ -76,7 +77,6 @@
                     </content>
                 </Panel>
 
-                <!-- Open Operations Panel -->
                 <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop">
                     <headerToolbar>
                         <Toolbar>
@@ -87,7 +87,15 @@
                         </Toolbar>
                     </headerToolbar>
                     <content>
-                        <List id="ordersList" items="{orders>/orders}" noDataText="No open operations" showSeparators="None" backgroundDesign="Transparent">
+                        <List 
+                            id="ordersList" 
+                            items="{orders>/orders}" 
+                            noDataText="No open operations" 
+                            showSeparators="None" 
+                            backgroundDesign="Transparent"
+                            growing="true"
+                            growingThreshold="20"
+                            growingScrollToLoad="true">
                             <CustomListItem type="Active" press=".onSelectOrder" visible="{= !${orders>timerState/isRunning} }">
                                 <VBox class="customCard">
                                     <FlexBox justifyContent="SpaceBetween" alignItems="Start">
@@ -103,7 +111,6 @@
                                         </VBox>
                                     </FlexBox>
 
-                                    <!-- Operation Details Panel -->
                                     <Panel backgroundDesign="Transparent" class="sapUiNoContentPadding" visible="{= ${orders>orderId} === ${activeTimer>/activeOrderId} &amp;&amp; ${orders>operationId} === ${activeTimer>/activeOperationId} }">
                                         <f:SimpleForm layout="ResponsiveGridLayout" editable="false" class="sapUiSmallMarginTop" labelSpanL="4" labelSpanM="4" emptySpanL="0" emptySpanM="0" columnsL="1" columnsM="1">
                                             <core:Title text="Operation Details" />

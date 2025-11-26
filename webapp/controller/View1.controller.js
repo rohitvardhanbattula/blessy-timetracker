@@ -50,7 +50,6 @@ sap.ui.define([
             this.getOwnerComponent().setModel(oDraftsModel, "drafts");
 
             this.saveEntryToDrafts();
-
             this.loadOrdersAndTimeEntries();
         },
 
@@ -186,7 +185,7 @@ sap.ui.define([
         fetchActiveTimeEntries: function () {
             var that = this;
             return new Promise(function (resolve) {
-                var sUrl = that.sHanaServiceUrl + "?format=json";  // no $filter here
+                var sUrl = that.sHanaServiceUrl + "?format=json";
 
                 fetch(sUrl, {
                     method: "GET",
@@ -216,7 +215,14 @@ sap.ui.define([
 
             aTimeEntries.forEach(function (oEntry) {
                 var oOrder = aOrders.find(function (o) {
-                    return o.orderId === oEntry.OrderID && o.operationId === oEntry.OperationSO;
+                    // FIX: Ensure strict matching handles potential leading zeros or string/int mismatch
+                    // We compare them as Strings after removing leading zeros just to be safe
+                    var orderIdA = parseInt(o.orderId, 10);
+                    var orderIdB = parseInt(oEntry.OrderID, 10);
+                    var opIdA = parseInt(o.operationId, 10);
+                    var opIdB = parseInt(oEntry.OperationSO, 10);
+
+                    return orderIdA === orderIdB && opIdA === opIdB;
                 });
 
                 if (oOrder) {
@@ -225,7 +231,7 @@ sap.ui.define([
                     var sClockInTimeIso = null;
 
                     if (sStartDate && sStartTime) {
-                        sClockInTimeIso = sStartDate + "T" + sStartTime + "Z";
+                        sClockInTimeIso = sStartDate + "T" + sStartTime;
                     }
 
                     oOrder.timerState = {
@@ -250,19 +256,17 @@ sap.ui.define([
                 var oOrdersModel = that.getOwnerComponent().getModel("orders");
                 var aOrders = oOrdersModel.getProperty("/orders");
                 var bIsAnyTimerRunning = false;
+                var iNow = new Date().getTime();
 
-                aOrders.forEach(function (oOrder, i) {
+                aOrders.forEach(function (oOrder, iIndex) {
                     if (oOrder.timerState.isRunning && oOrder.timerState.clockInTime) {
                         bIsAnyTimerRunning = true;
-                        var sPath = "/orders/" + i;
-                        var oTimerState = oOrder.timerState;
-
-                        var sClockInTime = oTimerState.clockInTime;
-                        var iBaseSeconds = oTimerState.baseElapsedSeconds || 0;
-                        var iSessionSeconds = (new Date().getTime() - new Date(sClockInTime).getTime()) / 1000;
+                        var sClockInTime = oOrder.timerState.clockInTime;
+                        var iBaseSeconds = oOrder.timerState.baseElapsedSeconds || 0;
+                        var iSessionSeconds = (iNow - new Date(sClockInTime).getTime()) / 1000;
                         var iTotalSeconds = Math.round(iBaseSeconds + iSessionSeconds);
 
-                        oOrdersModel.setProperty(sPath + "/timerState/elapsedSeconds", iTotalSeconds);
+                        oOrdersModel.setProperty("/orders/" + iIndex + "/timerState/elapsedSeconds", iTotalSeconds);
                     }
                 });
 
@@ -276,22 +280,23 @@ sap.ui.define([
         _stopSpecificTimer: function (oContext) {
             var sPath = oContext.getPath();
             var oTimerState = oContext.getProperty("timerState");
-
-            if (!oTimerState || !oTimerState.isRunning || !oTimerState.clockInTime) {
-                return oTimerState.elapsedSeconds || 0;
-            }
-
+            if (!oTimerState) return 0;
             var sClockInTime = oTimerState.clockInTime;
             var iBaseSeconds = oTimerState.baseElapsedSeconds || 0;
-            var iSessionSeconds = (new Date().getTime() - new Date(sClockInTime).getTime()) / 1000;
-            var iTotalSeconds = Math.round(iBaseSeconds + iSessionSeconds);
-
+            var iTotalSeconds = oTimerState.elapsedSeconds;
+            if (sClockInTime) {
+                var iSessionSeconds = (new Date().getTime() - new Date(sClockInTime).getTime()) / 1000;
+                iTotalSeconds = Math.round(iBaseSeconds + iSessionSeconds);
+            }
             oTimerState.elapsedSeconds = iTotalSeconds;
             oTimerState.isRunning = false;
             oTimerState.clockInTime = null;
             oTimerState.baseElapsedSeconds = iTotalSeconds;
-
             oContext.getModel().setProperty(sPath + "/timerState", oTimerState);
+            var oInProgressList = this.byId("inProgressList");
+            if (oInProgressList) {
+                oInProgressList.getBinding("items").refresh();
+            }
             this._updatePanelVisibility();
             return iTotalSeconds;
         },
@@ -355,9 +360,9 @@ sap.ui.define([
                 oActiveTimerModel.setProperty("/activeOperationId", sOperationId);
             }
         },
+
         _getCsrfToken: function () {
             var that = this;
-
             if (this._csrfToken) {
                 return Promise.resolve(this._csrfToken);
             }
@@ -377,16 +382,19 @@ sap.ui.define([
                     that._csrfToken = token;
                     return token;
                 });
-        }
-        ,
+        },
+
         onClockIn: function (oEvent) {
             var that = this;
             var oContext = oEvent.getSource().getBindingContext("orders");
             var sOrderId = oContext.getProperty("orderId");
             var sOperationId = oContext.getProperty("operationId");
-            var sPunchInTimeIso = new Date().toISOString();
-            var datePart = sPunchInTimeIso.substring(0, 10);
-            var timePart = sPunchInTimeIso.substring(11, 19);
+
+            var now = new Date();
+            var localIso = new Date(now.getTime() - (now.getTimezoneOffset() * 60000)).toISOString();
+            var datePart = localIso.slice(0, 10);
+            var timePart = localIso.slice(11, 19);
+            var sPunchInTimeIso = datePart + "T" + timePart;
 
             var oPayload = {
                 UserID: "TEST",
@@ -414,7 +422,6 @@ sap.ui.define([
                 })
                 .then(function (data) {
                     var sTimeEntryId = data.ID || (data.d && data.d.ID);
-
                     var oTimerState = oContext.getProperty("timerState");
                     oTimerState.isRunning = true;
                     oTimerState.clockInTime = sPunchInTimeIso;
@@ -423,37 +430,44 @@ sap.ui.define([
                     oTimerState.timeEntryId = sTimeEntryId;
 
                     oContext.getModel().setProperty(oContext.getPath() + "/timerState", oTimerState);
-
                     that._startGlobalTimerInterval();
                     that._updatePanelVisibility();
+
+                    var oInProgressList = that.byId("inProgressList");
+                    if (oInProgressList) {
+                        oInProgressList.getBinding("items").refresh();
+                    }
+
                     MessageToast.show("Clocked in successfully");
                 })
                 .catch(function (error) {
                     MessageBox.error("Failed to clock in: " + error.message);
                 });
         },
+
         onClockOut: function (oEvent) {
             var that = this;
             var oContext = oEvent.getSource().getBindingContext("orders");
             var sOrderId = oContext.getProperty("orderId");
             var sOperationId = oContext.getProperty("operationId");
+
+            // 1. Calculate time, but DO NOT stop the timer in the model yet
             var sClockOutTime = new Date();
             var sClockInTime = new Date(oContext.getProperty("timerState/clockInTime"));
-            var iFinalElapsedSeconds = this._stopSpecificTimer(oContext);
+
+            // Manual calculation instead of calling _stopSpecificTimer
+            var iBaseSeconds = oContext.getProperty("timerState/baseElapsedSeconds") || 0;
+            var iSessionSeconds = (sClockOutTime.getTime() - sClockInTime.getTime()) / 1000;
+            var iFinalElapsedSeconds = Math.round(iBaseSeconds + iSessionSeconds);
             var fActualWorkHours = (iFinalElapsedSeconds / 3600).toFixed(2);
 
-            // Fetch existing InProcess entries filtered by orderId and operationId
             var sUrl = this.sHanaServiceUrl + "?format=json";
 
             fetch(sUrl, {
                 method: "GET",
-                headers: {
-                    "Content-Type": "application/json"
-                }
+                headers: { "Content-Type": "application/json" }
             })
-                .then(function (response) {
-                    return response.json();
-                })
+                .then(function (response) { return response.json(); })
                 .then(function (data) {
                     var aResults = data.value || (data.d && data.d.results) || [];
                     var aFiltered = aResults.filter(function (item) {
@@ -468,9 +482,9 @@ sap.ui.define([
                     }
 
                     var oTimeEntry = aFiltered[0];
-
-                    // Set dialog model data for BAPI posting
                     var oDialogModel = that.getView().getModel("dialog");
+
+                    // 2. Set data to dialog, including the Context Path so we can stop it later
                     oDialogModel.setData({
                         orderId: sOrderId,
                         operationId: sOperationId,
@@ -480,18 +494,17 @@ sap.ui.define([
                         elapsedSeconds: iFinalElapsedSeconds,
                         confirmationText: "",
                         isFinalConfirmation: false,
-                        contextPath: oContext.getPath(),
-                        timeEntryId: oTimeEntry.ID  // use the correct time entry id
+                        contextPath: oContext.getPath(), // <--- Important: Save the path
+                        timeEntryId: oTimeEntry.ID
                     });
-
 
                     that.openSubmitDialog();
                 })
                 .catch(function (error) {
                     MessageBox.error("Failed to retrieve active time entries: " + error.message);
                 });
-        }
-        ,
+        },
+
         updateTimeEntryOnServer: function (orderID, operationId, sPunchOutTime, sStatus) {
             var that = this;
             var filter =
@@ -516,20 +529,18 @@ sap.ui.define([
                         throw new Error("No matching entries with status InProcess or Error.");
                     }
 
-                    // For each entry found, PATCH update it
                     var patchPromises = entries.map(function (entry) {
-                        var sUrl = that.sHanaServiceUrl + "(ID='" + encodeURIComponent(entry.ID) + "')"; // Use unique ID
-
+                        var sUrl = that.sHanaServiceUrl + "(ID='" + encodeURIComponent(entry.ID) + "')";
                         var oPayload = {};
                         if (sPunchOutTime) {
                             var d = new Date(sPunchOutTime);
-                            oPayload.ExecFinDate = d.toISOString().substring(0, 10);
-                            oPayload.ExecFinTime = d.toISOString().substring(11, 19);
+                            var localIso = new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString();
+                            oPayload.ExecFinDate = localIso.slice(0, 10);
+                            oPayload.ExecFinTime = localIso.slice(11, 19);
                         }
                         if (sStatus) {
                             oPayload.Status = sStatus;
                         }
-
 
                         return fetch(sUrl, {
                             method: "GET",
@@ -565,10 +576,7 @@ sap.ui.define([
                 .catch(function (error) {
                     MessageBox.error("Failed to update time entries: " + error.message);
                 });
-        }
-
-
-        ,
+        },
 
         openSubmitDialog: function () {
             var that = this;
@@ -587,6 +595,7 @@ sap.ui.define([
         },
 
         onCloseDialog: function () {
+            this.fetchActiveTimeEntries();
             this._oSubmitDialog.close();
         },
 
@@ -605,7 +614,7 @@ sap.ui.define([
 
         postConfirmationToBAPI: function (oData) {
             var that = this;
-            var sUrl = that.sHanaServiceUrl + "?$format=json"; // Fetch all entries, no filter
+            var sUrl = that.sHanaServiceUrl + "?$format=json";
 
             fetch(sUrl, {
                 method: "GET",
@@ -618,8 +627,6 @@ sap.ui.define([
                 })
                 .then(function (data) {
                     var entries = data.value || [];
-
-                    // Client-side filter for matching OrderID, OperationSO, and Status InProcess/Error
                     var filteredEntries = entries.filter(function (entry) {
                         return entry.OrderID === oData.orderId
                             && entry.OperationSO === oData.operationId
@@ -630,15 +637,13 @@ sap.ui.define([
                         throw new Error("No matching time entry found.");
                     }
 
-                    var entry = filteredEntries[0]; // Use first matching entry
+                    var entry = filteredEntries[0];
 
-                    // Parse start and finish datetime
                     function parseDateTime(dateStr, timeStr) {
                         return dateStr && timeStr ? new Date(dateStr + "T" + timeStr) : null;
                     }
 
                     var execStartDateTime = parseDateTime(entry.ExecStartDate, entry.ExecStartTime);
-
                     var execFinishDateTime = null;
                     if (oData.workFinishDate) {
                         execFinishDateTime = new Date(oData.workFinishDate);
@@ -646,7 +651,6 @@ sap.ui.define([
                         execFinishDateTime = parseDateTime(entry.ExecFinDate, entry.ExecFinTime);
                     }
 
-                    // Calculate actual work hours (ACT_WORK) as decimal hours rounded to 2 decimals
                     var actWorkHours = 0;
                     if (execStartDateTime && execFinishDateTime && execFinishDateTime > execStartDateTime) {
                         var elapsedMs = execFinishDateTime - execStartDateTime;
@@ -654,12 +658,15 @@ sap.ui.define([
                         actWorkHours = parseFloat(actWorkHours.toFixed(2));
                     }
 
-                    // Format date and time for BAPI: yyyy-MM-dd and HH:mm:ss
                     function formatDateForBAPI(date) {
-                        return date ? date.toISOString().slice(0, 10) : "";
+                        if (!date) return "";
+                        var localIso = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString();
+                        return localIso.slice(0, 10);
                     }
                     function formatTimeForBAPI(date) {
-                        return date ? date.toISOString().slice(11, 19) : "";
+                        if (!date) return "";
+                        var localIso = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString();
+                        return localIso.slice(11, 19);
                     }
 
                     var oPayload = {
@@ -669,7 +676,7 @@ sap.ui.define([
                             ? oData.confirmationText
                             : "Confirmed",
                         ACT_WORK: actWorkHours,
-                        UN_WORK: 0, 
+                        UN_WORK: 0,
                         EXEC_START_DATE: entry.ExecStartDate,
                         EXEC_START_TIME: entry.ExecStartTime,
                         EXEC_FIN_DATE: formatDateForBAPI(execFinishDateTime),
@@ -691,7 +698,11 @@ sap.ui.define([
                 .then(function (bapiData) {
                     if (bapiData.RETURN && bapiData.RETURN.TYPE === "S") {
                         MessageToast.show("Confirmation posted successfully!");
-
+                        if (oData.contextPath) {
+                            var oOrdersModel = that.getOwnerComponent().getModel("orders");
+                            var oContext = oOrdersModel.createBindingContext(oData.contextPath);
+                            that._stopSpecificTimer(oContext);
+                        }
                         that.updateTimeEntryOnServer(
                             oData.orderId,
                             oData.operationId,
@@ -707,6 +718,12 @@ sap.ui.define([
                 .catch(function (error) {
                     MessageBox.error("Network Error: Could not submit. Entry saved to Drafts. " + error.message, {
                         onClose: function () {
+
+                            if (oData.contextPath) {
+                                var oOrdersModel = that.getOwnerComponent().getModel("orders");
+                                var oContext = oOrdersModel.createBindingContext(oData.contextPath);
+                                that._stopSpecificTimer(oContext); // Stop it here too
+                            }
                             that.updateTimeEntryOnServer(
                                 oData.orderId,
                                 oData.operationId,
@@ -718,8 +735,7 @@ sap.ui.define([
                         }
                     });
                 });
-        }
-        ,
+        },
 
         formatDateForBAPI: function (oDate) {
             var d = new Date(oDate);
@@ -731,7 +747,7 @@ sap.ui.define([
 
         saveEntryToDrafts: function () {
             var that = this;
-            var sUrl = this.sHanaServiceUrl + "?format=json"; // no server-side filter to avoid 400 error
+            var sUrl = this.sHanaServiceUrl + "?format=json";
 
             fetch(sUrl, {
                 method: "GET",
@@ -744,20 +760,15 @@ sap.ui.define([
                 })
                 .then(function (data) {
                     var aResults = data.value || (data.d && data.d.results) || [];
-
-                    // Filter entries with Status equal to "Error"
                     var aErrorEntries = aResults.filter(function (item) {
                         return item.Status === "Error";
                     });
 
-                    // Calculate and add formattedTime for each entry
                     aErrorEntries.forEach(function (item) {
                         try {
                             var startDateTime = new Date(item.ExecStartDate + "T" + item.ExecStartTime);
                             var endDateTime = new Date(item.ExecFinDate + "T" + item.ExecFinTime);
                             var diffSeconds = (endDateTime - startDateTime) / 1000;
-
-                            // Format as HH:mm:ss or total seconds as you prefer
                             var hours = Math.floor(diffSeconds / 3600);
                             var minutes = Math.floor((diffSeconds % 3600) / 60);
                             var seconds = Math.floor(diffSeconds % 60);
@@ -771,20 +782,17 @@ sap.ui.define([
                         }
                     });
 
-                    // Set filtered entries in the drafts model
                     var oDraftsModel = that.getOwnerComponent().getModel("drafts");
                     oDraftsModel.setProperty("/entries", aErrorEntries);
                 })
                 .catch(function (error) {
                     MessageBox.error("Failed to load draft entries: " + error.message);
                 });
-        }
-        ,
+        },
 
         onPostDraft: function (oEvent) {
             var oContext = oEvent.getSource().getBindingContext("drafts");
             var oDraft = oContext.getObject();
-
             MessageToast.show("Retrying post for Order " + oDraft.orderID + "...");
             this.postConfirmationToBAPI(oDraft);
         },
@@ -799,13 +807,11 @@ sap.ui.define([
             MessageBox.confirm("Are you sure you want to delete this draft entry?", {
                 onClose: function (sAction) {
                     if (sAction === MessageBox.Action.OK) {
-
                         var aNewEntries = aEntries.filter(function (entry) {
                             return entry.id !== oDraft.id;
                         });
                         oDraftsModel.setProperty("/entries", aNewEntries);
                         MessageToast.show("Draft deleted.");
-
 
                         var filter =
                             "OrderID eq '" + oDraft.orderId + "' and " +
@@ -830,11 +836,8 @@ sap.ui.define([
                                         throw new Error("No matching entry found");
                                     }
                                     var sId = data.value[0].ID;
-
                                     if (sId) {
                                         var sUrl = that.sHanaServiceUrl + "(ID='" + encodeURIComponent(sId) + "')";
-
-
                                         fetch(sUrl, {
                                             method: "GET",
                                             headers: { "Accept": "application/json" },
@@ -845,7 +848,6 @@ sap.ui.define([
                                                 return res.headers.get("ETag");
                                             })
                                             .then(function (sETag) {
-
                                                 fetch(sUrl, {
                                                     method: "PATCH",
                                                     headers: {
@@ -874,7 +876,5 @@ sap.ui.define([
                 }
             });
         }
-
-
     });
 });
