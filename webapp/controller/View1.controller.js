@@ -21,8 +21,23 @@ sap.ui.define([
             const date = new Date(ms);
             return date.toISOString().slice(0, 19);
         },
+        getCurrentUserId: function () {
+            return this.sUserIdFLP || 'RBATTULA';
+        },
 
         onInit: function () {
+            var that = this;
+
+
+            if (sap.ushell && sap.ushell.Container) {
+                sap.ushell.Container.getServiceAsync("UserInfo").then(function (oUserInfo) {
+                    that.sUserIdFLP = oUserInfo.getId();
+                }).catch(function () {
+                    that.sUserIdFLP = 'RBATTULA';
+                });
+            } else {
+                that.sUserIdFLP = 'RBATTULA';
+            }
             var oBusyModel = new JSONModel({ busy: false });
             this.getView().setModel(oBusyModel, "busy");
 
@@ -185,7 +200,10 @@ sap.ui.define([
         fetchActiveTimeEntries: function () {
             var that = this;
             return new Promise(function (resolve) {
-                var sUrl = that.sHanaServiceUrl + "?format=json";
+
+                var sUserId = that.getCurrentUserId();
+                var sFilter = `CreatedBy eq '${sUserId}'`;
+                var sUrl = that.sHanaServiceUrl + "?$filter=" + encodeURIComponent(sFilter) + "&$format=json";
 
                 fetch(sUrl, {
                     method: "GET",
@@ -461,7 +479,8 @@ sap.ui.define([
             var iFinalElapsedSeconds = Math.round(iBaseSeconds + iSessionSeconds);
             var fActualWorkHours = (iFinalElapsedSeconds / 3600).toFixed(2);
 
-            var sUrl = this.sHanaServiceUrl + "?format=json";
+            var sUserId = that.getCurrentUserId();
+            var sUrl = that.sHanaServiceUrl + "?$filter=CreatedBy eq '" + sUserId + "'&$format=json";
 
             fetch(sUrl, {
                 method: "GET",
@@ -507,9 +526,9 @@ sap.ui.define([
 
         updateTimeEntryOnServer: function (orderID, operationId, sPunchOutTime, sStatus) {
             var that = this;
-            var filter =
-                "OrderID eq '" + orderID + "' and OperationSO eq '" + operationId + "' and UserID eq 'TEST' and " +
-                "(Status eq 'InProcess' or Status eq 'Error')";
+            var sUserId = that.getCurrentUserId();
+            var filter = "OrderID eq '" + orderID + "' and OperationSO eq '" + operationId + "' and UserID eq '" + sUserId + "' and " +
+                "(Status eq 'InProcess' or Status eq 'Error') and CreatedBy eq '" + sUserId + "'";
             var sQueryUrl = that.sHanaServiceUrl + "?$filter=" + encodeURIComponent(filter) + "&$format=json";
 
             fetch(sQueryUrl, {
@@ -530,7 +549,9 @@ sap.ui.define([
                     }
 
                     var patchPromises = entries.map(function (entry) {
-                        var sUrl = that.sHanaServiceUrl + "(ID='" + encodeURIComponent(entry.ID) + "')";
+                        var sUserId = that.getCurrentUserId();
+                        var sUrl = that.sHanaServiceUrl + "(ID='" + encodeURIComponent(entry.ID) + "')?$filter=CreatedBy eq '" + sUserId + "'";
+
                         var oPayload = {};
                         if (sPunchOutTime) {
                             var d = new Date(sPunchOutTime);
@@ -614,7 +635,9 @@ sap.ui.define([
 
         postConfirmationToBAPI: function (oData) {
             var that = this;
-            var sUrl = that.sHanaServiceUrl + "?$format=json";
+            var sUserId = that.getCurrentUserId();
+            var sUrl = that.sHanaServiceUrl + "?$filter=CreatedBy eq '" + sUserId + "'&$format=json";
+
 
             fetch(sUrl, {
                 method: "GET",
@@ -747,7 +770,9 @@ sap.ui.define([
 
         saveEntryToDrafts: function () {
             var that = this;
-            var sUrl = this.sHanaServiceUrl + "?format=json";
+            var sUserId = that.getCurrentUserId();
+            var sUrl = that.sHanaServiceUrl + "?$filter=CreatedBy eq '" + sUserId + "'&$format=json";
+
 
             fetch(sUrl, {
                 method: "GET",
@@ -813,11 +838,14 @@ sap.ui.define([
                         oDraftsModel.setProperty("/entries", aNewEntries);
                         MessageToast.show("Draft deleted.");
 
+                        var sUserId = that.getCurrentUserId();
                         var filter =
                             "OrderID eq '" + oDraft.orderId + "' and " +
                             "OperationSO eq '" + oDraft.operationId + "' and " +
-                            "UserID eq 'TEST' and " +
+                            "UserID eq '" + sUserId + "' and " +
+                            "CreatedBy eq '" + sUserId + "' and " +
                             "(Status eq 'Error')";
+
 
                         var sQueryUrl = that.sHanaServiceUrl + "?$filter=" + encodeURIComponent(filter) + "&$format=json";
 
