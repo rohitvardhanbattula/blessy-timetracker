@@ -10,11 +10,23 @@
     "title": "{{appTitle}}",
     "description": "{{appDescription}}",
     "resources": "resources.json",
-    
     "sourceTemplate": {
       "id": "@sap/generator-fiori:basic",
       "version": "1.14.5",
       "toolsId": "259afb27-0840-4dbd-8fd7-d6f44e859a02"
+    },
+    "crossNavigation": {
+      "inbounds": {
+        "z_timetracker_sem_obj-manage": {
+          "semanticObject": "z_timetracker_sem_obj",
+          "action": "manage",
+          "title": "{{flpTitle}}",
+          "signature": {
+            "parameters": {},
+            "additionalParameters": "allowed"
+          }
+        }
+      }
     }
   },
   "sap.ui": {
@@ -53,7 +65,6 @@
       "cozy": true
     },
     "models": {
-      
       "i18n": {
         "type": "sap.ui.model.resource.ResourceModel",
         "settings": {

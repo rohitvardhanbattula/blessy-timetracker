@@ -22,22 +22,28 @@ sap.ui.define([
             return date.toISOString().slice(0, 19);
         },
         getCurrentUserId: function () {
-            return this.sUserIdFLP || 'RBATTULA';
+            return this.sUserIdFLP||"";
         },
+        _initializeUserId: function () {
+            var that = this;
+            return new Promise((resolve) => {
+                if (sap.ushell && sap.ushell.Container) {
+                    sap.ushell.Container.getServiceAsync("UserInfo").then(function (oUserInfo) {
+                        that.sUserIdFLP = oUserInfo.getId();
+                        console.log("User ID loaded:", that.sUserIdFLP);
+                        resolve();
+                    }).catch(function () {
+                        
+                        resolve();
+                    });
+                } else {
 
+                    resolve();
+                }
+            });
+        },
         onInit: function () {
             var that = this;
-
-
-            if (sap.ushell && sap.ushell.Container) {
-                sap.ushell.Container.getServiceAsync("UserInfo").then(function (oUserInfo) {
-                    that.sUserIdFLP = oUserInfo.getId();
-                }).catch(function () {
-                    that.sUserIdFLP = 'RBATTULA';
-                });
-            } else {
-                that.sUserIdFLP = 'RBATTULA';
-            }
             var oBusyModel = new JSONModel({ busy: false });
             this.getView().setModel(oBusyModel, "busy");
 
@@ -65,7 +71,9 @@ sap.ui.define([
             this.getOwnerComponent().setModel(oDraftsModel, "drafts");
 
             this.saveEntryToDrafts();
-            this.loadOrdersAndTimeEntries();
+            this._initializeUserId().then(() => {
+                that.loadOrdersAndTimeEntries();
+            });
         },
 
         removeLeadingZeros: function (sOrderId) {
