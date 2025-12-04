@@ -1,361 +1,646 @@
 sap.ui.define([
     "sap/ui/core/mvc/Controller",
     "sap/ui/model/json/JSONModel",
-    "sap/ui/model/Filter",
-    "sap/ui/model/FilterOperator",
     "sap/m/MessageToast",
     "sap/m/MessageBox",
     "sap/ui/core/Fragment"
-], function (Controller, JSONModel, Filter, FilterOperator, MessageToast, MessageBox, Fragment) {
+], function (Controller, JSONModel, MessageToast, MessageBox, Fragment) {
     "use strict";
 
     return Controller.extend("timetracker.controller.View1", {
-
         _timerInterval: null,
         _oSubmitDialog: null,
-        sHanaServiceUrl: "/sap/opu/odata4/sap/zapi_cs_cio_o4/srvd_a2x/sap/zapi_cs_cio_o4/0001/ZC_CS_CIO",
+        _sCsrfToken: null,
+        filterDebounceTimer: null,
+        sHanaServiceUrl: "/sap/opu/odata4/sap/zapi_cs_cio_tt_o4/srvd_a2x/sap/zapi_cs_cio_tt_o4/0001/ZC_CS_CIO_TT",
 
-        formatDate: function (input) {
-            if (!input) return "";
-            const ms = Number(input.match(/\d+/)[0]);
-            const date = new Date(ms);
-            return date.toISOString().slice(0, 19);
-        },
-        getCurrentUserId: function () {
-            return this.sUserIdFLP||"";
-        },
-        _initializeUserId: function () {
-            var that = this;
-            return new Promise((resolve) => {
-                if (sap.ushell && sap.ushell.Container) {
-                    sap.ushell.Container.getServiceAsync("UserInfo").then(function (oUserInfo) {
-                        that.sUserIdFLP = oUserInfo.getId();
-                        console.log("User ID loaded:", that.sUserIdFLP);
-                        resolve();
-                    }).catch(function () {
-                        
-                        resolve();
-                    });
-                } else {
-
-                    resolve();
-                }
+        onInit: function () {
+            this._initModels();
+            this._initializeUserId().then(() => {
+                this.loadOrdersAndTimeEntries();
             });
         },
-        onInit: function () {
-            var that = this;
-            var oBusyModel = new JSONModel({ busy: false });
-            this.getView().setModel(oBusyModel, "busy");
 
-            var oActiveTimerModel = new JSONModel({ activeOrderId: null, activeOperationId: null });
-            this.getView().setModel(oActiveTimerModel, "activeTimer");
+        _initModels: function () {
+            this.getView().setModel(new JSONModel({ busy: false }), "busy");
 
-            var oDialogModel = new JSONModel({
+            this.getView().setModel(new JSONModel({
+                activeOrderId: null,
+                activeOperationId: null
+            }), "activeTimer");
+
+            this.getView().setModel(new JSONModel({
                 orderId: null,
                 operationId: null,
                 workStartDate: null,
                 workFinishDate: null,
-                actualWork: "0.0",
+                actualWork: 0.0,
                 confirmationText: "",
-                isFinalConfirmation: false,
                 contextPath: null,
-                timeEntryId: null,
-                elapsedSeconds: 0
-            });
-            this.getView().setModel(oDialogModel, "dialog");
+                timeEntryId: null
+            }), "dialog");
 
-            var oViewStateModel = new JSONModel({ isProgressPanelVisible: false });
-            this.getOwnerComponent().setModel(oViewStateModel, "viewState");
-
-            var oDraftsModel = new JSONModel({ entries: [] });
-            this.getOwnerComponent().setModel(oDraftsModel, "drafts");
+            const oComponent = this.getOwnerComponent();
+            oComponent.setModel(new JSONModel({ isProgressPanelVisible: false }), "viewState");
+            oComponent.setModel(new JSONModel({ entries: [] }), "drafts");
+            oComponent.setModel(new JSONModel({ orders: [] }), "orders");
 
             this.saveEntryToDrafts();
-            this._initializeUserId().then(() => {
-                that.loadOrdersAndTimeEntries();
+        },
+
+        _setBusy: function (bBusy) {
+            this.getView().getModel("busy").setProperty("/busy", bBusy);
+        },
+
+        getCurrentUserId: function () {
+            return this.sUserIdFLP || 'Undefined';
+        },
+
+        _initializeUserId: function () {
+            return new Promise(resolve => {
+                if (sap.ushell && sap.ushell.Container) {
+                    sap.ushell.Container.getServiceAsync("UserInfo").then((oUserInfo) => {
+                        this.sUserIdFLP = oUserInfo.getId();
+                        resolve();
+                    }).catch(() => resolve());
+                } else {
+                    resolve();
+                }
             });
         },
 
-        removeLeadingZeros: function (sOrderId) {
-            if (!sOrderId) return "";
-            return parseInt(sOrderId, 10).toString();
-        },
+        _authenticatedFetch: async function (url, method = "GET", body = null, isRetry = false) {
+            const headers = {
+                'Content-Type': 'application/json',
+                'Accept': 'application/json'
+            };
 
-        formatTime: function (iTotalSeconds) {
-            if (iTotalSeconds === null || iTotalSeconds === undefined) return "00:00:00";
-            let h = Math.floor(iTotalSeconds / 3600);
-            let m = Math.floor((iTotalSeconds % 3600) / 60);
-            let s = iTotalSeconds % 60;
-            return [h, m, s].map(v => (v < 10 ? "0" : "") + v).join(":");
-        },
-
-        async loadOrdersAndTimeEntries() {
-            this.getView().getModel("busy").setProperty("/busy", true);
-            try {
-                const sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
-                const sUrl = "/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=" +
-                    encodeURIComponent(sFilter) + "&$expand=to_MaintenanceOrderOperation&$format=json";
-
-                const response = await fetch(sUrl);
-                if (!response.ok) {
-                    throw new Error("Failed to fetch orders");
+            if (method !== "GET") {
+                if (!this._sCsrfToken) {
+                    await this._refreshCsrfToken();
                 }
-                const data = await response.json();
-                const aOrdersRaw = data.d && data.d.results ? data.d.results : [];
+                if (this._sCsrfToken) {
+                    headers['X-CSRF-Token'] = this._sCsrfToken;
+                }
+            }
 
-                const aFlatOrders = [];
+            const options = {
+                method: method,
+                headers: headers,
+                credentials: 'include'
+            };
 
-                aOrdersRaw.forEach(order => {
-                    const aOperations = order.to_MaintenanceOrderOperation ? order.to_MaintenanceOrderOperation.results : [];
-                    aOperations.forEach(op => {
-                        aFlatOrders.push({
-                            orderId: order.MaintenanceOrder,
-                            orderDesc: order.MaintenanceOrderDesc || "",
-                            operationId: op.MaintenanceOrderOperation,
-                            operationDesc: op.OperationDescription || "",
-                            workCenter: op.WorkCenter || order.MainWorkCenter || "",
-                            systemStatus: op.SystemStatusText || order.SystemStatusText || "",
-                            reqStartDate: this.formatDate(op.OpErlstSchedldExecStrtDteTme) ? this.formatDate(op.OpErlstSchedldExecStrtDteTme) : null,
-                            reqEndDate: this.formatDate(op.OpErlstSchedldExecEndDteTme) ? this.formatDate(op.OpErlstSchedldExecEndDteTme) : null,
-                            assignedTo: op.OperationPersonResponsible || order.MaintOrdPersonResponsible || "",
-                            activityType: op.ActivityType || order.MaintenanceActivityType || "",
-                            timerState: {
-                                elapsedSeconds: 0,
-                                baseElapsedSeconds: 0,
-                                isRunning: false,
-                                clockInTime: null,
-                                timeEntryId: null
-                            }
-                        });
-                    });
-                });
+            if (body) {
+                options.body = JSON.stringify(body);
+            }
 
-                let oOrdersModel = new JSONModel({ orders: aFlatOrders });
-                this.getOwnerComponent().setModel(oOrdersModel, "orders");
+            try {
+                const response = await fetch(url, options);
+                const isForbidden = response.status === 403;
+                const isCsrfError = response.headers.get("x-csrf-token") === "Required";
 
-                const aTimeEntries = await this.fetchActiveTimeEntries();
-                this.mergeTimeEntriesWithOrders(aTimeEntries);
-                this._startGlobalTimerInterval();
-                this._updatePanelVisibility();
+                if (isForbidden && isCsrfError && !isRetry) {
+                    await this._refreshCsrfToken();
+                    return this._authenticatedFetch(url, method, body, true);
+                }
 
-            } catch (err) {
-                MessageBox.error("Error loading orders and operations: " + err.message);
-            } finally {
-                this.getView().getModel("busy").setProperty("/busy", false);
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${errorText}`);
+                }
+                return response;
+            } catch (error) {
+                throw error;
             }
         },
 
-        async loadOrdersAndTimeEntriesFiltered(sOrderIdFilter) {
-            this.getView().getModel("busy").setProperty("/busy", true);
+        _refreshCsrfToken: async function () {
+            try {
+                const response = await fetch(this.sHanaServiceUrl, {
+                    method: "GET",
+                    headers: {
+                        "X-CSRF-Token": "Fetch",
+                        "Accept": "application/json"
+                    },
+                    credentials: 'include'
+                });
+                const token = response.headers.get("X-CSRF-Token");
+                if (token) {
+                    this._sCsrfToken = token;
+                }
+            } catch (e) {
+                console.error("Failed to fetch CSRF token:", e);
+            }
+        },
 
+        _toCSTIsoString: function (oDate) {
+            const d = oDate || new Date();
+            const options = {
+                timeZone: "America/Chicago",
+                hour12: false,
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+            };
+
+            const fmt = new Intl.DateTimeFormat('en-US', options);
+            const parts = fmt.formatToParts(d);
+            const getPart = (type) => parts.find(p => p.type === type).value;
+
+            return `${getPart('year')}-${getPart('month')}-${getPart('day')}T${getPart('hour')}:${getPart('minute')}:${getPart('second')}`;
+        },
+
+        loadOrdersAndTimeEntries: async function () {
+            this._setBusy(true);
+            try {
+                const sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
+                const sUrl = `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=${encodeURIComponent(sFilter)}&$expand=to_MaintenanceOrderOperation&$format=json`;
+
+                const response = await this._authenticatedFetch(sUrl);
+                const data = await response.json();
+                const aOrdersRaw = data.d ? data.d.results : [];
+
+                const aFlatOrders = this._processOrders(aOrdersRaw);
+                this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
+
+                const aTimeEntries = await this.fetchActiveTimeEntries();
+                this.mergeTimeEntriesWithOrders(aTimeEntries);
+
+                this.startGlobalTimerInterval();
+                this.updatePanelVisibility();
+            } catch (err) {
+                MessageBox.error(err.message);
+            } finally {
+                this._setBusy(false);
+            }
+        },
+
+        loadOrdersAndTimeEntriesFiltered: async function (sOrderIdFilter) {
+            this._setBusy(true);
             try {
                 let sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
                 if (sOrderIdFilter && sOrderIdFilter.length > 0) {
-                    sFilter += " and substringof('" + sOrderIdFilter + "', MaintenanceOrder)";
+                    sFilter += ` and substringof('${sOrderIdFilter}', MaintenanceOrder)`;
                 }
-                const sUrl = "/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=" +
-                    encodeURIComponent(sFilter) + "&$expand=to_MaintenanceOrderOperation&$format=json";
 
-                const response = await fetch(sUrl);
-                if (!response.ok) {
-                    throw new Error("Failed to fetch filtered orders");
-                }
+                const sUrl = `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=${encodeURIComponent(sFilter)}&$expand=to_MaintenanceOrderOperation&$format=json`;
+
+                const response = await this._authenticatedFetch(sUrl);
                 const data = await response.json();
-                const aOrdersRaw = data.d && data.d.results ? data.d.results : [];
+                const aOrdersRaw = data.d ? data.d.results : [];
 
-                const aFlatOrders = [];
-
-                aOrdersRaw.forEach(order => {
-                    const aOperations = order.to_MaintenanceOrderOperation ? order.to_MaintenanceOrderOperation.results : [];
-                    aOperations.forEach(op => {
-                        aFlatOrders.push({
-                            orderId: order.MaintenanceOrder,
-                            orderDesc: order.MaintenanceOrderDesc || "",
-                            operationId: op.MaintenanceOrderOperation,
-                            operationDesc: op.OperationDescription || "",
-                            workCenter: op.WorkCenter || order.MainWorkCenter || "",
-                            systemStatus: op.SystemStatusText || order.SystemStatusText || "",
-                            reqStartDate: this.formatDate(op.OpErlstSchedldExecStrtDteTme) ? this.formatDate(op.OpErlstSchedldExecStrtDteTme) : null,
-                            reqEndDate: this.formatDate(op.OpErlstSchedldExecEndDteTme) ? this.formatDate(op.OpErlstSchedldExecEndDteTme) : null,
-                            assignedTo: op.OperationPersonResponsible || order.MaintOrdPersonResponsible || "",
-                            activityType: op.ActivityType || order.MaintenanceActivityType || "",
-                            timerState: {
-                                elapsedSeconds: 0,
-                                baseElapsedSeconds: 0,
-                                isRunning: false,
-                                clockInTime: null,
-                                timeEntryId: null
-                            }
-                        });
-                    });
-                });
-
-                let oOrdersModel = new JSONModel({ orders: aFlatOrders });
-                this.getOwnerComponent().setModel(oOrdersModel, "orders");
+                const aFlatOrders = this._processOrders(aOrdersRaw);
+                this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
 
                 const aTimeEntries = await this.fetchActiveTimeEntries();
                 this.mergeTimeEntriesWithOrders(aTimeEntries);
-                this._startGlobalTimerInterval();
-                this._updatePanelVisibility();
 
+                this.startGlobalTimerInterval();
+                this.updatePanelVisibility();
             } catch (err) {
-                MessageBox.error("Error loading filtered orders and operations: " + err.message);
+                MessageBox.error(err.message);
             } finally {
-                this.getView().getModel("busy").setProperty("/busy", false);
+                this._setBusy(false);
             }
         },
 
-        fetchActiveTimeEntries: function () {
-            var that = this;
-            return new Promise(function (resolve) {
-
-                var sUserId = that.getCurrentUserId();
-                var sFilter = `CreatedBy eq '${sUserId}'`;
-                var sUrl = that.sHanaServiceUrl + "?$filter=" + encodeURIComponent(sFilter) + "&$format=json";
-
-                fetch(sUrl, {
-                    method: "GET",
-                    headers: {
-                        "Content-Type": "application/json"
-                    }
-                })
-                    .then(function (response) {
-                        return response.json();
-                    })
-                    .then(function (data) {
-                        var aResults = data.value || (data.d && data.d.results) || [];
-                        var aFiltered = aResults.filter(function (item) {
-                            return item.Status === "InProcess";
-                        });
-                        resolve(aFiltered);
-                    })
-                    .catch(function () {
-                        resolve([]);
+        _processOrders: function (aOrdersRaw) {
+            const aFlatOrders = [];
+            aOrdersRaw.forEach(order => {
+                const aOperations = order.to_MaintenanceOrderOperation ? order.to_MaintenanceOrderOperation.results : [];
+                aOperations.forEach(op => {
+                    aFlatOrders.push({
+                        orderId: order.MaintenanceOrder,
+                        orderDesc: order.MaintenanceOrderDesc,
+                        operationId: op.MaintenanceOrderOperation,
+                        operationDesc: op.OperationDescription,
+                        workCenter: op.WorkCenter || order.MainWorkCenter,
+                        systemStatus: op.SystemStatusText || order.SystemStatusText,
+                        reqStartDate: this._formatDate(op.OpErlstSchedldExecStrtDteTme),
+                        reqEndDate: this._formatDate(op.OpErlstSchedldExecEndDteTme),
+                        assignedTo: op.OperationPersonResponsible || order.MaintOrdPersonResponsible,
+                        activityType: op.ActivityType || order.MaintenanceActivityType,
+                        timerState: {
+                            elapsedSeconds: 0,
+                            baseElapsedSeconds: 0,
+                            isRunning: false,
+                            clockInTime: null,
+                            timeEntryId: null
+                        }
                     });
+                });
             });
+            return aFlatOrders;
+        },
+
+        fetchActiveTimeEntries: async function () {
+            const sUserId = this.getCurrentUserId();
+            const sFilter = `UserID eq '${sUserId}'`;
+            const sUrl = `${this.sHanaServiceUrl}?$filter=${encodeURIComponent(sFilter)}&$format=json`;
+
+            try {
+                const response = await this._authenticatedFetch(sUrl);
+                const data = await response.json();
+                const aAllResults = data.value || (data.d ? data.d.results : []);
+                return aAllResults.filter(item => item.Status === 'InProcess' || item.Status === 'Error');
+            } catch (e) {
+                console.error("Failed to fetch active time entries:", e);
+                return [];
+            }
         },
 
         mergeTimeEntriesWithOrders: function (aTimeEntries) {
-            var oOrdersModel = this.getOwnerComponent().getModel("orders");
-            var aOrders = oOrdersModel.getProperty("/orders");
+            const oOrdersModel = this.getOwnerComponent().getModel("orders");
+            const aOrders = oOrdersModel.getProperty("/orders");
+            let bHasChanges = false;
 
-            aTimeEntries.forEach(function (oEntry) {
-                var oOrder = aOrders.find(function (o) {
-                    // FIX: Ensure strict matching handles potential leading zeros or string/int mismatch
-                    // We compare them as Strings after removing leading zeros just to be safe
-                    var orderIdA = parseInt(o.orderId, 10);
-                    var orderIdB = parseInt(oEntry.OrderID, 10);
-                    var opIdA = parseInt(o.operationId, 10);
-                    var opIdB = parseInt(oEntry.OperationSO, 10);
+            const sNowCST = this._toCSTIsoString(new Date());
+            const dNowCST = new Date(sNowCST);
 
-                    return orderIdA === orderIdB && opIdA === opIdB;
-                });
+            aTimeEntries.forEach(oEntry => {
+                if (oEntry.Status !== 'InProcess') return;
+
+                const oOrder = aOrders.find(o =>
+                    String(parseInt(o.orderId, 10)) === String(parseInt(oEntry.OrderID, 10)) &&
+                    String(parseInt(o.operationId, 10)) === String(parseInt(oEntry.OperationSo, 10))
+                );
 
                 if (oOrder) {
-                    var sStartDate = oEntry.ExecStartDate;
-                    var sStartTime = oEntry.ExecStartTime;
-                    var sClockInTimeIso = null;
+                    const sSapStartIso = `${oEntry.ExecStartDate}T${oEntry.ExecStartTime}`;
+                    const dSapStartCST = new Date(sSapStartIso);
 
-                    if (sStartDate && sStartTime) {
-                        sClockInTimeIso = sStartDate + "T" + sStartTime;
-                    }
+                    const iDiffSeconds = Math.round((dNowCST.getTime() - dSapStartCST.getTime()) / 1000);
+                    const nowLocal = new Date();
+                    const dLocalClockIn = new Date(nowLocal.getTime() - (iDiffSeconds * 1000));
 
                     oOrder.timerState = {
-                        elapsedSeconds: 0,
-                        baseElapsedSeconds: 0,
+                        elapsedSeconds: iDiffSeconds,
+                        baseElapsedSeconds: iDiffSeconds,
                         isRunning: true,
-                        clockInTime: sClockInTimeIso,
-                        timeEntryId: oEntry.ID
+                        clockInTime: dLocalClockIn.toISOString(),
+                        timeEntryId: oEntry.SapUUID
                     };
+                    bHasChanges = true;
                 }
             });
 
-            oOrdersModel.refresh();
+            if (bHasChanges) {
+                oOrdersModel.refresh();
+            }
         },
 
-        _startGlobalTimerInterval: function () {
-            var that = this;
-            if (this._timerInterval) {
-                return;
-            }
-            this._timerInterval = setInterval(function () {
-                var oOrdersModel = that.getOwnerComponent().getModel("orders");
-                var aOrders = oOrdersModel.getProperty("/orders");
-                var bIsAnyTimerRunning = false;
-                var iNow = new Date().getTime();
+        startGlobalTimerInterval: function () {
+            if (this._timerInterval) return;
 
-                aOrders.forEach(function (oOrder, iIndex) {
+            this._timerInterval = setInterval(() => {
+                const oOrdersModel = this.getOwnerComponent().getModel("orders");
+                const aOrders = oOrdersModel.getProperty("/orders");
+                const iNow = Date.now();
+                let bAnyRunning = false;
+
+                aOrders.forEach((oOrder, iIndex) => {
                     if (oOrder.timerState.isRunning && oOrder.timerState.clockInTime) {
-                        bIsAnyTimerRunning = true;
-                        var sClockInTime = oOrder.timerState.clockInTime;
-                        var iBaseSeconds = oOrder.timerState.baseElapsedSeconds || 0;
-                        var iSessionSeconds = (iNow - new Date(sClockInTime).getTime()) / 1000;
-                        var iTotalSeconds = Math.round(iBaseSeconds + iSessionSeconds);
+                        bAnyRunning = true;
+                        const iStartTime = new Date(oOrder.timerState.clockInTime).getTime();
+                        const iBase = oOrder.timerState.baseElapsedSeconds || 0;
+                        const iTotalSeconds = Math.round(((iNow - iStartTime) / 1000));
 
-                        oOrdersModel.setProperty("/orders/" + iIndex + "/timerState/elapsedSeconds", iTotalSeconds);
+                        if (oOrder.timerState.elapsedSeconds !== iTotalSeconds) {
+                            oOrdersModel.setProperty(`/orders/${iIndex}/timerState/elapsedSeconds`, iTotalSeconds);
+                        }
                     }
                 });
 
-                if (!bIsAnyTimerRunning) {
-                    clearInterval(that._timerInterval);
-                    that._timerInterval = null;
+                if (!bAnyRunning) {
+                    clearInterval(this._timerInterval);
+                    this._timerInterval = null;
                 }
             }, 1000);
         },
 
-        _stopSpecificTimer: function (oContext) {
-            var sPath = oContext.getPath();
-            var oTimerState = oContext.getProperty("timerState");
-            if (!oTimerState) return 0;
-            var sClockInTime = oTimerState.clockInTime;
-            var iBaseSeconds = oTimerState.baseElapsedSeconds || 0;
-            var iTotalSeconds = oTimerState.elapsedSeconds;
-            if (sClockInTime) {
-                var iSessionSeconds = (new Date().getTime() - new Date(sClockInTime).getTime()) / 1000;
-                iTotalSeconds = Math.round(iBaseSeconds + iSessionSeconds);
+        onClockIn: async function (oEvent) {
+            this._setBusy(true);
+            const oContext = oEvent.getSource().getBindingContext("orders");
+            const sOrderId = oContext.getProperty("orderId");
+            const sOperationId = oContext.getProperty("operationId");
+
+            const nowLocal = new Date();
+            const cstIso = this._toCSTIsoString(nowLocal);
+            const datePartCST = cstIso.slice(0, 10);
+            const timePartCST = cstIso.slice(11, 19);
+
+            const oPayload = {
+                "OrderID": sOrderId,
+                "OperationSo": sOperationId,
+                "UserID": this.getCurrentUserId(),
+                "ExecStartDate": datePartCST,
+                "ExecStartTime": timePartCST,
+                "ExecFinDate": datePartCST,
+                "ExecFinTime": timePartCST,
+                "Status": "InProcess"
+            };
+
+            try {
+                const response = await this._authenticatedFetch(this.sHanaServiceUrl, "POST", oPayload);
+                const data = await response.json();
+                const sNewEntry = data.value ? data.value[0] : (data.d || data);
+                const sTimeEntryUUID = sNewEntry.SapUUID || null;
+
+                const oTimerState = oContext.getProperty("timerState");
+                oTimerState.isRunning = true;
+                oTimerState.clockInTime = nowLocal.toISOString();
+                oTimerState.baseElapsedSeconds = 0;
+                oTimerState.elapsedSeconds = 0;
+                oTimerState.timeEntryId = sTimeEntryUUID;
+
+                oContext.getModel().refresh();
+                this.startGlobalTimerInterval();
+                this.updatePanelVisibility();
+                MessageToast.show("Clocked in");
+            } catch (error) {
+                MessageBox.error(error.message);
+            } finally {
+                this._setBusy(false);
             }
-            oTimerState.elapsedSeconds = iTotalSeconds;
-            oTimerState.isRunning = false;
-            oTimerState.clockInTime = null;
-            oTimerState.baseElapsedSeconds = iTotalSeconds;
-            oContext.getModel().setProperty(sPath + "/timerState", oTimerState);
-            var oInProgressList = this.byId("inProgressList");
-            if (oInProgressList) {
-                oInProgressList.getBinding("items").refresh();
-            }
-            this._updatePanelVisibility();
-            return iTotalSeconds;
         },
 
-        _updatePanelVisibility: function () {
-            var oOrdersModel = this.getOwnerComponent().getModel("orders");
-            var oViewStateModel = this.getOwnerComponent().getModel("viewState");
-            var aOrders = oOrdersModel.getProperty("/orders");
+        onClockOut: async function (oEvent) {
+            this._setBusy(true);
+            const oContext = oEvent.getSource().getBindingContext("orders");
+            const sClockInTime = oContext.getProperty("timerState/clockInTime");
+            const sTimeEntryUUID = oContext.getProperty("timerState/timeEntryId");
+            const iBaseElapsed = oContext.getProperty("timerState/baseElapsedSeconds") || 0;
 
-            if (!aOrders) {
+            if (!sClockInTime || !sTimeEntryUUID) {
+                MessageBox.error("No active timer found.");
+                this._setBusy(false);
                 return;
             }
 
-            var bIsVisible = aOrders.some(function (order) {
-                return order.timerState.isRunning === true;
+            const nowLocal = new Date();
+            const startLocal = new Date(sClockInTime);
+
+            const iElapsedMs = nowLocal.getTime() - startLocal.getTime();
+            const iSessionSeconds = Math.round(iElapsedMs / 1000);
+            const iTotalSeconds = iBaseElapsed + iSessionSeconds;
+
+            const dEffectiveStartLocal = new Date(nowLocal.getTime() - (iTotalSeconds * 1000));
+            const fActualWorkHours = parseFloat((iTotalSeconds / 3600).toFixed(2));
+
+            try {
+                const oDialogModel = this.getView().getModel("dialog");
+                oDialogModel.setData({
+                    OrderID: oContext.getProperty("orderId"),
+                    OperationSo: oContext.getProperty("operationId"),
+                    workStartDate: dEffectiveStartLocal,
+                    workFinishDate: nowLocal,
+                    actualWork: fActualWorkHours,
+                    elapsedSeconds: iTotalSeconds,
+                    confirmationText: oContext.getProperty("orderDesc") || "",
+                    contextPath: oContext.getPath(),
+                    timeEntryId: sTimeEntryUUID
+                });
+
+                this.openSubmitDialog();
+            } catch (error) {
+                MessageBox.error(error.message);
+            } finally {
+                this._setBusy(false);
+            }
+        },
+
+        openSubmitDialog: function () {
+            if (!this.oSubmitDialog) {
+                Fragment.load({
+                    name: "timetracker.view.fragment.SubmitDialog",
+                    controller: this
+                }).then((oDialog) => {
+                    this.oSubmitDialog = oDialog;
+                    this.getView().addDependent(this.oSubmitDialog);
+                    this.oSubmitDialog.open();
+                });
+            } else {
+                this.oSubmitDialog.open();
+            }
+        },
+
+        onCloseDialog: function () {
+            if (this.oSubmitDialog) {
+                this.oSubmitDialog.close();
+            }
+            this.loadOrdersAndTimeEntries();
+            this.saveEntryToDrafts();
+        },
+
+        onSubmitConfirmation: function () {
+            const oDialogModel = this.getView().getModel("dialog");
+            const oData = oDialogModel.getData();
+
+            if (!oData.workStartDate || !oData.workFinishDate || oData.actualWork === undefined) {
+                MessageBox.error("Please fill in all required fields.");
+                return;
+            }
+
+            this._setBusy(true);
+            this.postConfirmationToBAPI(oData);
+        },
+
+        postConfirmationToBAPI: async function (oData) {
+            this._setBusy(true);
+
+            const sODataUrl = "/sap/opu/odata/sap/API_MAINTORDERCONFIRMATION/MaintOrderConfirmation";
+
+            try {
+                const fetchResponse = await fetch(sODataUrl, {
+                    method: "GET",
+                    headers: {
+                        "X-CSRF-Token": "Fetch",
+                        "Accept": "application/json"
+                    },
+                    credentials: "include"
+                });
+
+                const sToken = fetchResponse.headers.get("x-csrf-token");
+                if (!sToken) {
+                    throw new Error("Could not fetch CSRF Token from API_MAINTORDERCONFIRMATION");
+                }
+
+                const sOrderId = String(oData.OrderID).padStart(12, "0");
+                const sOperation = String(oData.OperationSo).padStart(4, "0");
+
+                const startCSTIso = this._toCSTIsoString(oData.workStartDate);
+                const finishCSTIso = this._toCSTIsoString(oData.workFinishDate);
+
+                const toODataDate = (iso) => {
+                    const timestamp = new Date(iso).getTime();
+                    return `/Date(${timestamp})/`;
+                };
+
+                const toODataTime = (iso) => {
+                    const timePart = iso.slice(11, 19);
+                    const [h, m, s] = timePart.split(':');
+                    return `PT${h}H${m}M${s}S`;
+                };
+
+                let sActualWork = parseFloat(oData.actualWork || 0).toFixed(1);
+                if (sActualWork === "0.0" && oData.elapsedSeconds > 0) {
+                    sActualWork = "0.1";
+                }
+
+                const oPayload = {
+                    "MaintenanceOrder": sOrderId,
+                    "MaintenanceOrderOperation": sOperation,
+                    "PersonnelNumber": "00000000",
+                    "ActualWorkQuantity": sActualWork,
+                    "ActualWorkQuantityUnit": "H",
+                    "IsFinalConfirmation": false,
+                    "ConfirmationText": oData.confirmationText || "Confirmed via App",
+                    "PostingDate": toODataDate(finishCSTIso),
+                    "OperationConfirmedStartDate": toODataDate(startCSTIso),
+                    "OperationConfirmedStartTime": toODataTime(startCSTIso),
+                    "OperationConfirmedEndDate": toODataDate(finishCSTIso),
+                    "OperationConfirmedEndTime": toODataTime(finishCSTIso)
+                };
+
+                const sPostUrl = sODataUrl;
+
+                const response = await fetch(sPostUrl, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "X-CSRF-Token": sToken
+                    },
+                    body: JSON.stringify(oPayload),
+                    credentials: "include"
+                });
+
+                const responseData = await response.json();
+
+                if (response.ok) {
+                    const result = responseData.d || responseData;
+                    const sConfNum = result.MaintOrderConf;
+                    const sConfCntr = result.MaintOrderConfCntrValue;
+
+                    sap.m.MessageBox.success(
+                        `Saved Successfully!\nConfirmation #: ${sConfNum}\nCounter: ${sConfCntr}`,
+                        {
+                            onClose: async () => {
+                                if (oData.contextPath && oData.timeEntryId) {
+                                    const oOrdersModel = this.getOwnerComponent().getModel("orders");
+                                    const oContext = oOrdersModel.createBindingContext(oData.contextPath);
+                                    this.stopSpecificTimer(oContext);
+                                }
+
+                                if (oData.timeEntryId) {
+                                    await this.updateTimeEntryOnServerByUUID(
+                                        oData.timeEntryId,
+                                        oData.workFinishDate,
+                                        "Completed"
+                                    );
+                                }
+                                this.onCloseDialog();
+                            }
+                        }
+                    );
+
+                } else {
+                    let sErrorMessage = "Unknown Error";
+
+                    try {
+                        if (responseData.error && responseData.error.message) {
+                            sErrorMessage = responseData.error.message.value;
+                        }
+
+                        if (responseData.error && responseData.error.innererror && responseData.error.innererror.errordetails) {
+                            const details = responseData.error.innererror.errordetails;
+                            if (details.length > 0) {
+                                const firstDetail = details.find(d => d.severity === "error");
+                                if (firstDetail) {
+                                    sErrorMessage = firstDetail.message;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        sErrorMessage = "Failed to parse error response.";
+                    }
+
+                    throw new Error(sErrorMessage);
+                }
+
+            } catch (error) {
+                sap.m.MessageBox.error(`Confirmation Failed: ${error.message}`);
+                this.onCloseWithError(oData);
+            } finally {
+                this._setBusy(false);
+            }
+        },
+
+        updateTimeEntryOnServerByUUID: async function (sSapUUID, finishDateLocal, sStatus) {
+            this._setBusy(true);
+            const sEntryUrl = `${this.sHanaServiceUrl}(${encodeURIComponent(sSapUUID)})`;
+
+            try {
+                if (!this._sCsrfToken) await this._refreshCsrfToken();
+
+                const oPayload = { Status: sStatus };
+                if (finishDateLocal) {
+                    const cstIso = this._toCSTIsoString(finishDateLocal);
+                    oPayload.ExecFinDate = cstIso.slice(0, 10);
+                    oPayload.ExecFinTime = cstIso.slice(11, 19);
+                }
+
+                const resHead = await this._authenticatedFetch(sEntryUrl, "GET");
+                const oData = await resHead.json();
+                const eTag = resHead.headers.get("ETag") || (oData.d && oData.d.__metadata ? oData.d.__metadata.etag : null);
+
+                await fetch(sEntryUrl, {
+                    method: "PATCH",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": this._sCsrfToken,
+                        "If-Match": eTag
+                    },
+                    body: JSON.stringify(oPayload),
+                    credentials: 'include'
+                });
+
+            } catch (e) {
+                console.error("Error updating time entry status on server:", e);
+            } finally {
+                this._setBusy(false);
+            }
+        },
+
+        stopSpecificTimer: function (oContext) {
+            const sPath = oContext.getPath();
+            oContext.getModel().setProperty(`${sPath}/timerState`, {
+                elapsedSeconds: 0,
+                baseElapsedSeconds: 0,
+                isRunning: false,
+                clockInTime: null,
+                timeEntryId: null
             });
-            oViewStateModel.setProperty("/isProgressPanelVisible", bIsVisible);
+            this.updatePanelVisibility();
+        },
+
+        updatePanelVisibility: function () {
+            const aOrders = this.getOwnerComponent().getModel("orders").getProperty("/orders");
+            const bVisible = aOrders.some(o => o.timerState.isRunning);
+            this.getOwnerComponent().getModel("viewState").setProperty("/isProgressPanelVisible", bVisible);
         },
 
         onSearchOrders: function () {
-            var that = this;
-            var oSearchField = this.byId("orderIdSearch");
-            var sQuery = oSearchField ? oSearchField.getValue().trim() : "";
+            const oSearchField = this.byId("orderIdSearch");
+            const sQuery = oSearchField ? oSearchField.getValue().trim() : "";
 
-            if (this._filterDebounceTimer) {
-                clearTimeout(this._filterDebounceTimer);
+            if (this.filterDebounceTimer) {
+                clearTimeout(this.filterDebounceTimer);
             }
-
-            this._filterDebounceTimer = setTimeout(function () {
+            this.filterDebounceTimer = setTimeout(() => {
                 if (!sQuery || sQuery.length < 3) {
-                    that.loadOrdersAndTimeEntries();
+                    this.loadOrdersAndTimeEntries();
                 } else {
-                    that.loadOrdersAndTimeEntriesFiltered(sQuery);
+                    this.loadOrdersAndTimeEntriesFiltered(sQuery);
                 }
             }, 400);
         },
@@ -366,17 +651,15 @@ sap.ui.define([
         },
 
         onSelectOrder: function (oEvent) {
-            var oContext = oEvent.getSource().getBindingContext("orders");
-            var sOrderId = oContext.getProperty("orderId");
-            var sOperationId = oContext.getProperty("operationId");
-            var oActiveTimerModel = this.getView().getModel("activeTimer");
+            const oContext = oEvent.getSource().getBindingContext("orders");
+            const sOrderId = oContext.getProperty("orderId");
+            const sOperationId = oContext.getProperty("operationId");
 
-            var sCurrentActiveId = oActiveTimerModel.getProperty("/activeOrderId");
-            var sCurrentActiveOp = oActiveTimerModel.getProperty("/activeOperationId");
+            const oActiveTimerModel = this.getView().getModel("activeTimer");
+            const sCurrentActiveId = oActiveTimerModel.getProperty("/activeOrderId");
+            const sCurrentActiveOp = oActiveTimerModel.getProperty("/activeOperationId");
 
-            if (oContext.getProperty("timerState/isRunning")) {
-                return;
-            }
+            if (oContext.getProperty("timerState/isRunning")) return;
 
             if (sCurrentActiveId === sOrderId && sCurrentActiveOp === sOperationId) {
                 oActiveTimerModel.setProperty("/activeOrderId", null);
@@ -387,388 +670,52 @@ sap.ui.define([
             }
         },
 
-        _getCsrfToken: function () {
-            var that = this;
-            if (this._csrfToken) {
-                return Promise.resolve(this._csrfToken);
+        onClose: function () {
+            const oDialogModel = this.getView().getModel("dialog");
+            const oData = oDialogModel.getData();
+            this.onCloseWithError(oData);
+        },
+
+        onCloseWithError: async function (oData) {
+            if (oData.contextPath && oData.timeEntryId) {
+                const oOrdersModel = this.getOwnerComponent().getModel("orders");
+                const oContext = oOrdersModel.createBindingContext(oData.contextPath);
+                this.stopSpecificTimer(oContext);
+
+                try {
+                    await this.updateTimeEntryOnServerByUUID(
+                        oData.timeEntryId,
+                        oData.workFinishDate,
+                        "Error"
+                    );
+                } catch (e) {
+                    console.error("Failed to mark time entry as Error on server:", e);
+                }
             }
-
-            return fetch(this.sHanaServiceUrl, {
-                method: "GET",
-                headers: {
-                    "X-CSRF-Token": "Fetch"
-                },
-                credentials: "include"
-            })
-                .then(function (response) {
-                    var token = response.headers.get("X-CSRF-Token");
-                    if (!token) {
-                        throw new Error("CSRF token not returned by backend");
-                    }
-                    that._csrfToken = token;
-                    return token;
-                });
+            this.onCloseDialog();
         },
 
-        onClockIn: function (oEvent) {
-            var that = this;
-            var oContext = oEvent.getSource().getBindingContext("orders");
-            var sOrderId = oContext.getProperty("orderId");
-            var sOperationId = oContext.getProperty("operationId");
-
-            var now = new Date();
-            var localIso = new Date(now.getTime() - (now.getTimezoneOffset() * 60000)).toISOString();
-            var datePart = localIso.slice(0, 10);
-            var timePart = localIso.slice(11, 19);
-            var sPunchInTimeIso = datePart + "T" + timePart;
-
-            var oPayload = {
-                UserID: "TEST",
-                OrderID: sOrderId,
-                OperationSO: sOperationId,
-                ExecStartDate: datePart,
-                ExecStartTime: timePart,
-                Status: "InProcess"
-            };
-
-            this._getCsrfToken()
-                .then(function (sToken) {
-                    return fetch(that.sHanaServiceUrl, {
-                        method: "POST",
-                        headers: {
-                            "Content-Type": "application/json",
-                            "X-CSRF-Token": sToken
-                        },
-                        credentials: "include",
-                        body: JSON.stringify(oPayload)
-                    });
-                })
-                .then(function (response) {
-                    return response.json();
-                })
-                .then(function (data) {
-                    var sTimeEntryId = data.ID || (data.d && data.d.ID);
-                    var oTimerState = oContext.getProperty("timerState");
-                    oTimerState.isRunning = true;
-                    oTimerState.clockInTime = sPunchInTimeIso;
-                    oTimerState.baseElapsedSeconds = 0;
-                    oTimerState.elapsedSeconds = 0;
-                    oTimerState.timeEntryId = sTimeEntryId;
-
-                    oContext.getModel().setProperty(oContext.getPath() + "/timerState", oTimerState);
-                    that._startGlobalTimerInterval();
-                    that._updatePanelVisibility();
-
-                    var oInProgressList = that.byId("inProgressList");
-                    if (oInProgressList) {
-                        oInProgressList.getBinding("items").refresh();
-                    }
-
-                    MessageToast.show("Clocked in successfully");
-                })
-                .catch(function (error) {
-                    MessageBox.error("Failed to clock in: " + error.message);
-                });
+        removeLeadingZeros: function (sOrderId) {
+            if (!sOrderId) return "";
+            return parseInt(sOrderId, 10).toString();
         },
 
-        onClockOut: function (oEvent) {
-            var that = this;
-            var oContext = oEvent.getSource().getBindingContext("orders");
-            var sOrderId = oContext.getProperty("orderId");
-            var sOperationId = oContext.getProperty("operationId");
-
-            // 1. Calculate time, but DO NOT stop the timer in the model yet
-            var sClockOutTime = new Date();
-            var sClockInTime = new Date(oContext.getProperty("timerState/clockInTime"));
-
-            // Manual calculation instead of calling _stopSpecificTimer
-            var iBaseSeconds = oContext.getProperty("timerState/baseElapsedSeconds") || 0;
-            var iSessionSeconds = (sClockOutTime.getTime() - sClockInTime.getTime()) / 1000;
-            var iFinalElapsedSeconds = Math.round(iBaseSeconds + iSessionSeconds);
-            var fActualWorkHours = (iFinalElapsedSeconds / 3600).toFixed(2);
-
-            var sUserId = that.getCurrentUserId();
-            var sUrl = that.sHanaServiceUrl + "?$filter=CreatedBy eq '" + sUserId + "'&$format=json";
-
-            fetch(sUrl, {
-                method: "GET",
-                headers: { "Content-Type": "application/json" }
-            })
-                .then(function (response) { return response.json(); })
-                .then(function (data) {
-                    var aResults = data.value || (data.d && data.d.results) || [];
-                    var aFiltered = aResults.filter(function (item) {
-                        return item.Status === "InProcess"
-                            && item.OrderID === sOrderId
-                            && item.OperationSO === sOperationId;
-                    });
-
-                    if (aFiltered.length === 0) {
-                        MessageBox.error("No active time entry found for clock out.");
-                        return;
-                    }
-
-                    var oTimeEntry = aFiltered[0];
-                    var oDialogModel = that.getView().getModel("dialog");
-
-                    // 2. Set data to dialog, including the Context Path so we can stop it later
-                    oDialogModel.setData({
-                        orderId: sOrderId,
-                        operationId: sOperationId,
-                        workStartDate: sClockInTime,
-                        workFinishDate: sClockOutTime,
-                        actualWork: fActualWorkHours,
-                        elapsedSeconds: iFinalElapsedSeconds,
-                        confirmationText: "",
-                        isFinalConfirmation: false,
-                        contextPath: oContext.getPath(), // <--- Important: Save the path
-                        timeEntryId: oTimeEntry.ID
-                    });
-
-                    that.openSubmitDialog();
-                })
-                .catch(function (error) {
-                    MessageBox.error("Failed to retrieve active time entries: " + error.message);
-                });
+        formatTime: function (iTotalSeconds) {
+            if (iTotalSeconds == null) return "00:00:00";
+            let h = Math.floor(iTotalSeconds / 3600);
+            let m = Math.floor((iTotalSeconds % 3600) / 60);
+            let s = iTotalSeconds % 60;
+            return [h, m, s].map(v => v < 10 ? "0" + v : v).join(":");
         },
 
-        updateTimeEntryOnServer: function (orderID, operationId, sPunchOutTime, sStatus) {
-            var that = this;
-            var sUserId = that.getCurrentUserId();
-            var filter = "OrderID eq '" + orderID + "' and OperationSO eq '" + operationId + "' and UserID eq '" + sUserId + "' and " +
-                "(Status eq 'InProcess' or Status eq 'Error') and CreatedBy eq '" + sUserId + "'";
-            var sQueryUrl = that.sHanaServiceUrl + "?$filter=" + encodeURIComponent(filter) + "&$format=json";
-
-            fetch(sQueryUrl, {
-                method: "GET",
-                headers: {
-                    "Accept": "application/json"
-                },
-                credentials: "include"
-            })
-                .then(function (response) {
-                    if (!response.ok) throw new Error("Failed to fetch entries: " + response.status);
-                    return response.json();
-                })
-                .then(function (data) {
-                    var entries = data.value || [];
-                    if (entries.length === 0) {
-                        throw new Error("No matching entries with status InProcess or Error.");
-                    }
-
-                    var patchPromises = entries.map(function (entry) {
-                        var sUserId = that.getCurrentUserId();
-                        var sUrl = that.sHanaServiceUrl + "(ID='" + encodeURIComponent(entry.ID) + "')?$filter=CreatedBy eq '" + sUserId + "'";
-
-                        var oPayload = {};
-                        if (sPunchOutTime) {
-                            var d = new Date(sPunchOutTime);
-                            var localIso = new Date(d.getTime() - (d.getTimezoneOffset() * 60000)).toISOString();
-                            oPayload.ExecFinDate = localIso.slice(0, 10);
-                            oPayload.ExecFinTime = localIso.slice(11, 19);
-                        }
-                        if (sStatus) {
-                            oPayload.Status = sStatus;
-                        }
-
-                        return fetch(sUrl, {
-                            method: "GET",
-                            headers: { "Accept": "application/json" },
-                            credentials: "include"
-                        })
-                            .then(function (res) {
-                                if (!res.ok) throw new Error("Failed to fetch ETag for ID " + entry.ID);
-                                return res.headers.get("ETag");
-                            })
-                            .then(function (sETag) {
-                                return that._getCsrfToken().then(function (sToken) {
-                                    return fetch(sUrl, {
-                                        method: "PATCH",
-                                        headers: {
-                                            "Content-Type": "application/json",
-                                            "X-CSRF-Token": sToken,
-                                            "If-Match": sETag
-                                        },
-                                        credentials: "include",
-                                        body: JSON.stringify(oPayload)
-                                    });
-                                });
-                            });
-                    });
-
-                    return Promise.all(patchPromises);
-                })
-                .then(function () {
-                    MessageToast.show("Time entries updated successfully");
-                    that.loadOrdersAndTimeEntries();
-                })
-                .catch(function (error) {
-                    MessageBox.error("Failed to update time entries: " + error.message);
-                });
-        },
-
-        openSubmitDialog: function () {
-            var that = this;
-            if (!this._oSubmitDialog) {
-                Fragment.load({
-                    name: "timetracker.view.fragment.SubmitDialog",
-                    controller: this
-                }).then(function (oDialog) {
-                    that._oSubmitDialog = oDialog;
-                    that.getView().addDependent(that._oSubmitDialog);
-                    that._oSubmitDialog.open();
-                });
-            } else {
-                this._oSubmitDialog.open();
-            }
-        },
-
-        onCloseDialog: function () {
-            this.fetchActiveTimeEntries();
-            this._oSubmitDialog.close();
-        },
-
-        onSubmitConfirmation: function () {
-            var oDialogModel = this.getView().getModel("dialog");
-            var oData = oDialogModel.getData();
-
-            if (!oData.workStartDate || !oData.workFinishDate || !oData.actualWork) {
-                MessageBox.error("Please fill in all required time fields.");
-                return;
-            }
-
-            MessageToast.show("Submitting to S/4HANA...");
-            this.postConfirmationToBAPI(oData);
-        },
-
-        postConfirmationToBAPI: function (oData) {
-            var that = this;
-            var sUserId = that.getCurrentUserId();
-            var sUrl = that.sHanaServiceUrl + "?$filter=CreatedBy eq '" + sUserId + "'&$format=json";
-
-
-            fetch(sUrl, {
-                method: "GET",
-                headers: { "Content-Type": "application/json" },
-                credentials: "include"
-            })
-                .then(function (response) {
-                    if (!response.ok) throw new Error("Failed to fetch time entries.");
-                    return response.json();
-                })
-                .then(function (data) {
-                    var entries = data.value || [];
-                    var filteredEntries = entries.filter(function (entry) {
-                        return entry.OrderID === oData.orderId
-                            && entry.OperationSO === oData.operationId
-                            && (entry.Status === "InProcess" || entry.Status === "Error");
-                    });
-
-                    if (filteredEntries.length === 0) {
-                        throw new Error("No matching time entry found.");
-                    }
-
-                    var entry = filteredEntries[0];
-
-                    function parseDateTime(dateStr, timeStr) {
-                        return dateStr && timeStr ? new Date(dateStr + "T" + timeStr) : null;
-                    }
-
-                    var execStartDateTime = parseDateTime(entry.ExecStartDate, entry.ExecStartTime);
-                    var execFinishDateTime = null;
-                    if (oData.workFinishDate) {
-                        execFinishDateTime = new Date(oData.workFinishDate);
-                    } else if (entry.ExecFinDate && entry.ExecFinTime) {
-                        execFinishDateTime = parseDateTime(entry.ExecFinDate, entry.ExecFinTime);
-                    }
-
-                    var actWorkHours = 0;
-                    if (execStartDateTime && execFinishDateTime && execFinishDateTime > execStartDateTime) {
-                        var elapsedMs = execFinishDateTime - execStartDateTime;
-                        actWorkHours = elapsedMs / (1000 * 3600);
-                        actWorkHours = parseFloat(actWorkHours.toFixed(2));
-                    }
-
-                    function formatDateForBAPI(date) {
-                        if (!date) return "";
-                        var localIso = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString();
-                        return localIso.slice(0, 10);
-                    }
-                    function formatTimeForBAPI(date) {
-                        if (!date) return "";
-                        var localIso = new Date(date.getTime() - (date.getTimezoneOffset() * 60000)).toISOString();
-                        return localIso.slice(11, 19);
-                    }
-
-                    var oPayload = {
-                        ORDERID: entry.OrderID,
-                        OPERATION: entry.OperationSO,
-                        CONF_TEXT: oData.confirmationText && oData.confirmationText.trim() !== ""
-                            ? oData.confirmationText
-                            : "Confirmed",
-                        ACT_WORK: actWorkHours,
-                        UN_WORK: 0,
-                        EXEC_START_DATE: entry.ExecStartDate,
-                        EXEC_START_TIME: entry.ExecStartTime,
-                        EXEC_FIN_DATE: formatDateForBAPI(execFinishDateTime),
-                        EXEC_FIN_TIME: formatTimeForBAPI(execFinishDateTime)
-                    };
-
-                    var sBapiUrl = "/sap/bc/zfmcall/BAPI_ALM_CONF_CRATE?format=json";
-
-                    return fetch(sBapiUrl, {
-                        method: "POST",
-                        headers: { "Content-Type": "application/json" },
-                        body: JSON.stringify(oPayload)
-                    });
-                })
-                .then(function (response) {
-                    if (!response.ok) throw new Error("BAPI call failed.");
-                    return response.json();
-                })
-                .then(function (bapiData) {
-                    if (bapiData.RETURN && bapiData.RETURN.TYPE === "S") {
-                        MessageToast.show("Confirmation posted successfully!");
-                        if (oData.contextPath) {
-                            var oOrdersModel = that.getOwnerComponent().getModel("orders");
-                            var oContext = oOrdersModel.createBindingContext(oData.contextPath);
-                            that._stopSpecificTimer(oContext);
-                        }
-                        that.updateTimeEntryOnServer(
-                            oData.orderId,
-                            oData.operationId,
-                            oData.workFinishDate,
-                            "Completed"
-                        );
-                        that.onCloseDialog();
-                    } else {
-                        var sErrorMsg = bapiData.RETURN ? bapiData.RETURN.MESSAGE : "Unknown error";
-                        throw new Error(sErrorMsg);
-                    }
-                })
-                .catch(function (error) {
-                    MessageBox.error("Network Error: Could not submit. Entry saved to Drafts. " + error.message, {
-                        onClose: function () {
-
-                            if (oData.contextPath) {
-                                var oOrdersModel = that.getOwnerComponent().getModel("orders");
-                                var oContext = oOrdersModel.createBindingContext(oData.contextPath);
-                                that._stopSpecificTimer(oContext); // Stop it here too
-                            }
-                            that.updateTimeEntryOnServer(
-                                oData.orderId,
-                                oData.operationId,
-                                oData.workFinishDate,
-                                "Error"
-                            );
-                            that.saveEntryToDrafts();
-                            that.onCloseDialog();
-                        }
-                    });
-                });
+        _formatDate: function (input) {
+            if (!input) return "";
+            const ms = Number(input.match(/(\d+)/)[0]);
+            return new Date(ms).toISOString().slice(0, 19);
         },
 
         formatDateForBAPI: function (oDate) {
+            if (!oDate) return "";
             var d = new Date(oDate);
             var year = d.getFullYear();
             var month = ("0" + (d.getMonth() + 1)).slice(-2);
@@ -776,141 +723,86 @@ sap.ui.define([
             return year + "-" + month + "-" + day;
         },
 
-        saveEntryToDrafts: function () {
-            var that = this;
-            var sUserId = that.getCurrentUserId();
-            var sUrl = that.sHanaServiceUrl + "?$filter=CreatedBy eq '" + sUserId + "'&$format=json";
+        saveEntryToDrafts: async function () {
+            const sUserId = this.getCurrentUserId();
+            const sUrl = `${this.sHanaServiceUrl}?$filter=UserID eq '${sUserId}'&$format=json`;
 
+            try {
+                const response = await this._authenticatedFetch(sUrl);
+                const data = await response.json();
+                const aAllResults = data.value || (data.d ? data.d.results : []);
 
-            fetch(sUrl, {
-                method: "GET",
-                headers: {
-                    "Content-Type": "application/json"
-                }
-            })
-                .then(function (response) {
-                    return response.json();
-                })
-                .then(function (data) {
-                    var aResults = data.value || (data.d && data.d.results) || [];
-                    var aErrorEntries = aResults.filter(function (item) {
-                        return item.Status === "Error";
-                    });
+                const aErrorEntries = aAllResults.filter(item => item.Status === 'Error');
 
-                    aErrorEntries.forEach(function (item) {
-                        try {
-                            var startDateTime = new Date(item.ExecStartDate + "T" + item.ExecStartTime);
-                            var endDateTime = new Date(item.ExecFinDate + "T" + item.ExecFinTime);
-                            var diffSeconds = (endDateTime - startDateTime) / 1000;
-                            var hours = Math.floor(diffSeconds / 3600);
-                            var minutes = Math.floor((diffSeconds % 3600) / 60);
-                            var seconds = Math.floor(diffSeconds % 60);
-
-                            item.formattedTime =
-                                (hours < 10 ? "0" + hours : hours) + ":" +
-                                (minutes < 10 ? "0" + minutes : minutes) + ":" +
-                                (seconds < 10 ? "0" + seconds : seconds);
-                        } catch (e) {
-                            item.formattedTime = "";
-                        }
-                    });
-
-                    var oDraftsModel = that.getOwnerComponent().getModel("drafts");
-                    oDraftsModel.setProperty("/entries", aErrorEntries);
-                })
-                .catch(function (error) {
-                    MessageBox.error("Failed to load draft entries: " + error.message);
+                aErrorEntries.forEach(item => {
+                    try {
+                        const sStart = `${item.ExecStartDate}T${item.ExecStartTime}`;
+                        const sEnd = `${item.ExecFinDate}T${item.ExecFinTime}`;
+                        const diff = (new Date(sEnd) - new Date(sStart)) / 1000;
+                        const h = Math.floor(diff / 3600);
+                        const m = Math.floor((diff % 3600) / 60);
+                        item.formattedTime = `${h}:${m < 10 ? '0' + m : m}`;
+                        item.actualWorkHours = parseFloat((diff / 3600).toFixed(2));
+                    } catch (e) {
+                        item.formattedTime = "--:--";
+                        item.actualWorkHours = 0;
+                    }
                 });
+
+                this.getOwnerComponent().getModel("drafts").setProperty("/entries", aErrorEntries);
+            } catch (e) {
+                console.error("Failed to load drafts:", e);
+            }
         },
 
         onPostDraft: function (oEvent) {
-            var oContext = oEvent.getSource().getBindingContext("drafts");
-            var oDraft = oContext.getObject();
-            MessageToast.show("Retrying post for Order " + oDraft.orderID + "...");
-            this.postConfirmationToBAPI(oDraft);
+            const oDraft = oEvent.getSource().getBindingContext("drafts").getObject();
+
+            const oData = {
+                OrderID: oDraft.OrderID,
+                OperationSo: oDraft.OperationSo,
+                workStartDate: new Date(`${oDraft.ExecStartDate}T${oDraft.ExecStartTime}`),
+                workFinishDate: new Date(`${oDraft.ExecFinDate}T${oDraft.ExecFinTime}`),
+                actualWork: oDraft.actualWorkHours,
+                confirmationText: "Draft Retry",
+                timeEntryId: oDraft.SapUUID,
+                contextPath: null
+            };
+
+            this._setBusy(true);
+            this.postConfirmationToBAPI(oData);
         },
 
         onDeleteDraft: function (oEvent) {
-            var that = this;
-            var oContext = oEvent.getSource().getBindingContext("drafts");
-            var oDraft = oContext.getObject();
-            var oDraftsModel = this.getOwnerComponent().getModel("drafts");
-            var aEntries = oDraftsModel.getProperty("/entries");
+            const oContext = oEvent.getSource().getBindingContext("drafts");
+            const oDraft = oContext.getObject();
 
-            MessageBox.confirm("Are you sure you want to delete this draft entry?", {
-                onClose: function (sAction) {
+            MessageBox.confirm("Are you sure you want to permanently delete this draft entry?", {
+                onClose: async (sAction) => {
                     if (sAction === MessageBox.Action.OK) {
-                        var aNewEntries = aEntries.filter(function (entry) {
-                            return entry.id !== oDraft.id;
-                        });
-                        oDraftsModel.setProperty("/entries", aNewEntries);
-                        MessageToast.show("Draft deleted.");
-
-                        var sUserId = that.getCurrentUserId();
-                        var filter =
-                            "OrderID eq '" + oDraft.orderId + "' and " +
-                            "OperationSO eq '" + oDraft.operationId + "' and " +
-                            "UserID eq '" + sUserId + "' and " +
-                            "CreatedBy eq '" + sUserId + "' and " +
-                            "(Status eq 'Error')";
-
-
-                        var sQueryUrl = that.sHanaServiceUrl + "?$filter=" + encodeURIComponent(filter) + "&$format=json";
-
-                        that._getCsrfToken().then(function (sToken) {
-                            fetch(sQueryUrl, {
-                                method: "GET",
-                                headers: { "Accept": "application/json" },
-                                credentials: "include"
-                            })
-                                .then(function (response) {
-                                    if (!response.ok) throw new Error("Failed to fetch entry");
-                                    return response.json();
-                                })
-                                .then(function (data) {
-                                    if (!data.value || data.value.length === 0) {
-                                        throw new Error("No matching entry found");
-                                    }
-                                    var sId = data.value[0].ID;
-                                    if (sId) {
-                                        var sUrl = that.sHanaServiceUrl + "(ID='" + encodeURIComponent(sId) + "')";
-                                        fetch(sUrl, {
-                                            method: "GET",
-                                            headers: { "Accept": "application/json" },
-                                            credentials: "include"
-                                        })
-                                            .then(function (res) {
-                                                if (!res.ok) throw new Error("Failed to fetch ETag for deletion");
-                                                return res.headers.get("ETag");
-                                            })
-                                            .then(function (sETag) {
-                                                fetch(sUrl, {
-                                                    method: "PATCH",
-                                                    headers: {
-                                                        "Content-Type": "application/json",
-                                                        "X-CSRF-Token": sToken,
-                                                        "If-Match": sETag
-                                                    },
-                                                    credentials: "include",
-                                                    body: JSON.stringify({ Status: "Deleted" })
-                                                })
-                                                    .then(function (resp) {
-                                                        if (!resp.ok) throw new Error("Failed to set Deleted status");
-                                                        MessageToast.show("Backend entry marked as Deleted");
-                                                    })
-                                                    .catch(function (err) {
-                                                        MessageBox.error("Error updating backend: " + err.message);
-                                                    });
-                                            });
-                                    }
-                                })
-                                .catch(function (error) {
-                                    MessageBox.error("Error fetching backend entry: " + error.message);
-                                });
-                        });
+                        try {
+                            this._setBusy(true);
+                            await this.updateTimeEntryOnServerByUUID(oDraft.SapUUID, null, "Deleted");
+                            this.saveEntryToDrafts();
+                            MessageToast.show("Draft deleted");
+                        } catch (e) {
+                            MessageBox.error("Failed to delete draft: " + e.message);
+                        } finally {
+                            this._setBusy(false);
+                        }
                     }
                 }
             });
+        },
+
+        _toLocalIsoString: function (date) {
+            const pad = function (num) { return (num < 10 ? '0' : '') + num; };
+            return date.getFullYear() +
+                '-' + pad(date.getMonth() + 1) +
+                '-' + pad(date.getDate()) +
+                'T' + pad(date.getHours()) +
+                ':' + pad(date.getMinutes()) +
+                ':' + pad(date.getSeconds());
         }
     });
 });

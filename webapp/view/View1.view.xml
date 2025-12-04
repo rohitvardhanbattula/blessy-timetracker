@@ -23,7 +23,7 @@
                                     <HBox alignItems="Center">
                                         <core:Icon size="2rem" src="sap-icon://save" class="sapUiMediumMarginEnd"/>
                                         <VBox>
-                                            <Title text="ACT: {drafts>OperationSO}" level="H4"/>
+                                            <Title text="ACT: {drafts>OperationSo}" level="H4"/>
                                             <Text text="ORD: {path: 'drafts>OrderID', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
                                             <Text text="Duration: {drafts>formattedTime}" class="cardSubtitle"/>
                                             <Text text="Error: {drafts>errorText}" class="sapUiErrorText" visible="{= !!${drafts>errorText} }"/>

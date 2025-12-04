@@ -14,7 +14,7 @@ builder:
       afterTask: generateCachebusterInfo
       configuration:
         target:
-          url: https://bmd.bye.hec.ondemand.com
+          url: https://bmd.bye.hec.ondemand.com/
           client: '800'
         app:
           name: Z_TIME_TRACKER
