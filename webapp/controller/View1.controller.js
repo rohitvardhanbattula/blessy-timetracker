@@ -157,7 +157,21 @@ sap.ui.define([
 
                 const response = await this._authenticatedFetch(sUrl);
                 const data = await response.json();
-                const aOrdersRaw = data.d ? data.d.results : [];
+                let aOrdersRaw = data.d ? data.d.results : [];
+
+                aOrdersRaw = aOrdersRaw.filter(oOrder => {
+                    const bOrderMatches = oOrder.SystemStatusText && oOrder.SystemStatusText.startsWith("REL");
+
+                    if (bOrderMatches) {
+                        if (oOrder.to_MaintenanceOrderOperation && oOrder.to_MaintenanceOrderOperation.results) {
+                            oOrder.to_MaintenanceOrderOperation.results = oOrder.to_MaintenanceOrderOperation.results.filter(oOp => {
+                                return !oOp.SystemStatusText || !oOp.SystemStatusText.startsWith("CNF");
+                            });
+                        }
+                        return true;
+                    }
+                    return false;
+                });
 
                 const aFlatOrders = this._processOrders(aOrdersRaw);
                 this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
@@ -186,7 +200,21 @@ sap.ui.define([
 
                 const response = await this._authenticatedFetch(sUrl);
                 const data = await response.json();
-                const aOrdersRaw = data.d ? data.d.results : [];
+                let aOrdersRaw = data.d ? data.d.results : [];
+
+                aOrdersRaw = aOrdersRaw.filter(oOrder => {
+                    const bOrderMatches = oOrder.SystemStatusText && oOrder.SystemStatusText.startsWith("REL");
+
+                    if (bOrderMatches) {
+                        if (oOrder.to_MaintenanceOrderOperation && oOrder.to_MaintenanceOrderOperation.results) {
+                            oOrder.to_MaintenanceOrderOperation.results = oOrder.to_MaintenanceOrderOperation.results.filter(oOp => {
+                                return !oOp.SystemStatusText || !oOp.SystemStatusText.startsWith("CNF");
+                            });
+                        }
+                        return true;
+                    }
+                    return false;
+                });
 
                 const aFlatOrders = this._processOrders(aOrdersRaw);
                 this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
