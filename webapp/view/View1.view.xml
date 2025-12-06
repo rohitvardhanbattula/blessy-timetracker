@@ -25,8 +25,7 @@
                                         <VBox>
                                             <Title text="ACT: {drafts>OperationSo}" level="H4"/>
                                             <Text text="ORD: {path: 'drafts>OrderID', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
-                                            <Text text="Duration: {drafts>formattedTime}" class="cardSubtitle"/>
-                                            <Text text="Error: {drafts>errorText}" class="sapUiErrorText" visible="{= !!${drafts>errorText} }"/>
+                                            <Text text="Calculated Duration: {drafts>formattedTime}" class="cardSubtitle"/>
                                         </VBox>
                                     </HBox>
                                     <HBox>
@@ -82,8 +81,8 @@
                         <Toolbar>
                             <Title text="Open Operations"/>
                             <ToolbarSpacer/>
-                            <SearchField width="40%" id="orderIdSearch" placeholder="OrderID"/>
-                            <Button text="Go" press=".onSearchOrders" class="sapUiTinyMarginBegin"/>
+                            <SearchField width="40%" id="orderIdSearch" placeholder="OrderID" search=".onSearchOrders"/>
+
                         </Toolbar>
                     </headerToolbar>
                     <content>

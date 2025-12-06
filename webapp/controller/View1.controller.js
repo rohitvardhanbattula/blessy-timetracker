@@ -36,6 +36,7 @@ sap.ui.define([
                 workFinishDate: null,
                 actualWork: 0.0,
                 confirmationText: "",
+                isFinalConfirmation: false,
                 contextPath: null,
                 timeEntryId: null
             }), "dialog");
@@ -147,6 +148,17 @@ sap.ui.define([
             const getPart = (type) => parts.find(p => p.type === type).value;
 
             return `${getPart('year')}-${getPart('month')}-${getPart('day')}T${getPart('hour')}:${getPart('minute')}:${getPart('second')}`;
+        },
+
+        _parseCSTIsoToDate: function (sCSTIso) {
+            if (!sCSTIso) return null;
+            let dTarget = new Date(sCSTIso);
+            let sCalculatedCST = this._toCSTIsoString(dTarget);
+            let tInput = new Date(sCSTIso + "Z").getTime();
+            let tCalculated = new Date(sCalculatedCST + "Z").getTime();
+            let diff = tInput - tCalculated;
+            dTarget.setTime(dTarget.getTime() + diff);
+            return dTarget;
         },
 
         loadOrdersAndTimeEntries: async function () {
@@ -423,7 +435,8 @@ sap.ui.define([
                     workFinishDate: nowLocal,
                     actualWork: fActualWorkHours,
                     elapsedSeconds: iTotalSeconds,
-                    confirmationText: oContext.getProperty("orderDesc") || "",
+                    confirmationText: "",
+                    isFinalConfirmation: false,
                     contextPath: oContext.getPath(),
                     timeEntryId: sTimeEntryUUID
                 });
@@ -499,7 +512,13 @@ sap.ui.define([
                 const finishCSTIso = this._toCSTIsoString(oData.workFinishDate);
 
                 const toODataDate = (iso) => {
-                    const timestamp = new Date(iso).getTime();
+                    const y = parseInt(iso.substring(0, 4), 10);
+                    const m = parseInt(iso.substring(5, 7), 10) - 1;
+                    const d = parseInt(iso.substring(8, 10), 10);
+                    const h = parseInt(iso.substring(11, 13), 10);
+                    const min = parseInt(iso.substring(14, 16), 10);
+                    const s = parseInt(iso.substring(17, 19), 10);
+                    const timestamp = Date.UTC(y, m, d, h, min, s);
                     return `/Date(${timestamp})/`;
                 };
 
@@ -520,9 +539,9 @@ sap.ui.define([
                     "PersonnelNumber": "00000000",
                     "ActualWorkQuantity": sActualWork,
                     "ActualWorkQuantityUnit": "H",
-                    "IsFinalConfirmation": false,
-                    "ConfirmationText": oData.confirmationText || "Confirmed via App",
-                    "PostingDate": toODataDate(finishCSTIso),
+                    "IsFinalConfirmation": oData.isFinalConfirmation || false,
+                    "ConfirmationText": oData.confirmationText || "",
+                    "PostingDate": toODataDate(this._toCSTIsoString(new Date())),
                     "OperationConfirmedStartDate": toODataDate(startCSTIso),
                     "OperationConfirmedStartTime": toODataTime(startCSTIso),
                     "OperationConfirmedEndDate": toODataDate(finishCSTIso),
@@ -562,6 +581,7 @@ sap.ui.define([
                                 if (oData.timeEntryId) {
                                     await this.updateTimeEntryOnServerByUUID(
                                         oData.timeEntryId,
+                                        oData.workStartDate,
                                         oData.workFinishDate,
                                         "Completed"
                                     );
@@ -603,7 +623,7 @@ sap.ui.define([
             }
         },
 
-        updateTimeEntryOnServerByUUID: async function (sSapUUID, finishDateLocal, sStatus) {
+        updateTimeEntryOnServerByUUID: async function (sSapUUID, startDateLocal, finishDateLocal, sStatus) {
             this._setBusy(true);
             const sEntryUrl = `${this.sHanaServiceUrl}(${encodeURIComponent(sSapUUID)})`;
 
@@ -611,6 +631,11 @@ sap.ui.define([
                 if (!this._sCsrfToken) await this._refreshCsrfToken();
 
                 const oPayload = { Status: sStatus };
+                if (startDateLocal) {
+                    const scstIso = this._toCSTIsoString(startDateLocal);
+                    oPayload.ExecStartDate = scstIso.slice(0, 10);
+                    oPayload.ExecStartTime = scstIso.slice(11, 19);
+                }
                 if (finishDateLocal) {
                     const cstIso = this._toCSTIsoString(finishDateLocal);
                     oPayload.ExecFinDate = cstIso.slice(0, 10);
@@ -713,6 +738,7 @@ sap.ui.define([
                 try {
                     await this.updateTimeEntryOnServerByUUID(
                         oData.timeEntryId,
+                        oData.workStartDate,
                         oData.workFinishDate,
                         "Error"
                     );
@@ -786,19 +812,32 @@ sap.ui.define([
         onPostDraft: function (oEvent) {
             const oDraft = oEvent.getSource().getBindingContext("drafts").getObject();
 
-            const oData = {
+            const sStartIso = `${oDraft.ExecStartDate}T${oDraft.ExecStartTime}`;
+            const sEndIso = `${oDraft.ExecFinDate}T${oDraft.ExecFinTime}`;
+
+            const dStart = this._parseCSTIsoToDate(sStartIso);
+            const dEnd = this._parseCSTIsoToDate(sEndIso);
+
+            const iDiffMs = dEnd.getTime() - dStart.getTime();
+            const iTotalSeconds = Math.round(iDiffMs / 1000);
+
+            const oDialogData = {
                 OrderID: oDraft.OrderID,
                 OperationSo: oDraft.OperationSo,
-                workStartDate: new Date(`${oDraft.ExecStartDate}T${oDraft.ExecStartTime}`),
-                workFinishDate: new Date(`${oDraft.ExecFinDate}T${oDraft.ExecFinTime}`),
+                workStartDate: dStart,
+                workFinishDate: dEnd,
                 actualWork: oDraft.actualWorkHours,
-                confirmationText: "Draft Retry",
+                elapsedSeconds: iTotalSeconds,
+                confirmationText: "",
+                isFinalConfirmation: false,
                 timeEntryId: oDraft.SapUUID,
                 contextPath: null
             };
 
-            this._setBusy(true);
-            this.postConfirmationToBAPI(oData);
+            const oDialogModel = this.getView().getModel("dialog");
+            oDialogModel.setData(oDialogData);
+
+            this.openSubmitDialog();
         },
 
         onDeleteDraft: function (oEvent) {
@@ -810,7 +849,7 @@ sap.ui.define([
                     if (sAction === MessageBox.Action.OK) {
                         try {
                             this._setBusy(true);
-                            await this.updateTimeEntryOnServerByUUID(oDraft.SapUUID, null, "Deleted");
+                            await this.updateTimeEntryOnServerByUUID(oDraft.SapUUID, null, null, "Deleted");
                             this.saveEntryToDrafts();
                             MessageToast.show("Draft deleted");
                         } catch (e) {
