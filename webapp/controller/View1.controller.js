@@ -11,12 +11,12 @@ sap.ui.define([
         _timerInterval: null,
         _oSubmitDialog: null,
         _sCsrfToken: null,
-        filterDebounceTimer: null,
+        _filterDebounceTimer: null,
         sHanaServiceUrl: "/sap/opu/odata4/sap/zapi_cs_cio_tt_o4/srvd_a2x/sap/zapi_cs_cio_tt_o4/0001/ZC_CS_CIO_TT",
 
         onInit: function () {
-            this._initModels();
             this._initializeUserId().then(() => {
+                this._initModels();
                 this.loadOrdersAndTimeEntries();
             });
         },
@@ -38,12 +38,14 @@ sap.ui.define([
                 confirmationText: "",
                 isFinalConfirmation: false,
                 contextPath: null,
-                timeEntryId: null
+                timeEntryId: null,
+                ActivityType: null
             }), "dialog");
 
             const oComponent = this.getOwnerComponent();
             oComponent.setModel(new JSONModel({ isProgressPanelVisible: false }), "viewState");
             oComponent.setModel(new JSONModel({ entries: [] }), "drafts");
+            oComponent.setModel(new JSONModel({ entries: [] }), "overheadFailures");
             oComponent.setModel(new JSONModel({ orders: [] }), "orders");
 
             this.saveEntryToDrafts();
@@ -70,70 +72,6 @@ sap.ui.define([
             });
         },
 
-        _authenticatedFetch: async function (url, method = "GET", body = null, isRetry = false) {
-            const headers = {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json'
-            };
-
-            if (method !== "GET") {
-                if (!this._sCsrfToken) {
-                    await this._refreshCsrfToken();
-                }
-                if (this._sCsrfToken) {
-                    headers['X-CSRF-Token'] = this._sCsrfToken;
-                }
-            }
-
-            const options = {
-                method: method,
-                headers: headers,
-                credentials: 'include'
-            };
-
-            if (body) {
-                options.body = JSON.stringify(body);
-            }
-
-            try {
-                const response = await fetch(url, options);
-                const isForbidden = response.status === 403;
-                const isCsrfError = response.headers.get("x-csrf-token") === "Required";
-
-                if (isForbidden && isCsrfError && !isRetry) {
-                    await this._refreshCsrfToken();
-                    return this._authenticatedFetch(url, method, body, true);
-                }
-
-                if (!response.ok) {
-                    const errorText = await response.text();
-                    throw new Error(`HTTP ${response.status}: ${errorText}`);
-                }
-                return response;
-            } catch (error) {
-                throw error;
-            }
-        },
-
-        _refreshCsrfToken: async function () {
-            try {
-                const response = await fetch(this.sHanaServiceUrl, {
-                    method: "GET",
-                    headers: {
-                        "X-CSRF-Token": "Fetch",
-                        "Accept": "application/json"
-                    },
-                    credentials: 'include'
-                });
-                const token = response.headers.get("X-CSRF-Token");
-                if (token) {
-                    this._sCsrfToken = token;
-                }
-            } catch (e) {
-                console.error("Failed to fetch CSRF token:", e);
-            }
-        },
-
         _toCSTIsoString: function (oDate) {
             const d = oDate || new Date();
             const options = {
@@ -150,15 +88,36 @@ sap.ui.define([
             return `${getPart('year')}-${getPart('month')}-${getPart('day')}T${getPart('hour')}:${getPart('minute')}:${getPart('second')}`;
         },
 
-        _parseCSTIsoToDate: function (sCSTIso) {
-            if (!sCSTIso) return null;
-            let dTarget = new Date(sCSTIso);
-            let sCalculatedCST = this._toCSTIsoString(dTarget);
-            let tInput = new Date(sCSTIso + "Z").getTime();
-            let tCalculated = new Date(sCalculatedCST + "Z").getTime();
-            let diff = tInput - tCalculated;
-            dTarget.setTime(dTarget.getTime() + diff);
-            return dTarget;
+        _parseServerCSTToLocalDate: function (sExecDate, sExecTime) {
+            if (!sExecDate || !sExecTime) return null;
+
+            const sCSTString = `${sExecDate}T${sExecTime}`;
+            const dNowLocal = new Date();
+            const sNowCSTString = this._toCSTIsoString(dNowLocal);
+
+            const tNowLocal_asTime = dNowLocal.getTime();
+            const tNowCST_asTime = new Date(sNowCSTString).getTime();
+
+            const iOffsetMs = tNowLocal_asTime - tNowCST_asTime;
+
+            const dServerAsLocal = new Date(sCSTString);
+            const dCorrectedLocal = new Date(dServerAsLocal.getTime() + iOffsetMs);
+
+            return dCorrectedLocal;
+        },
+
+        _verifyEntryStatus: async function(sSapUUID, sExpectedStatus) {
+            if (!sSapUUID) return false;
+            const sUrl = `${this.sHanaServiceUrl}(${encodeURIComponent(sSapUUID)})`;
+            try {
+                const response = await this._authenticatedFetch(sUrl, "GET");
+                if(!response.ok) return false;
+                const data = await response.json();
+                const oEntry = data.d || data; 
+                return oEntry.Status === sExpectedStatus;
+            } catch (error) {
+                return false;
+            }
         },
 
         loadOrdersAndTimeEntries: async function () {
@@ -173,50 +132,6 @@ sap.ui.define([
 
                 aOrdersRaw = aOrdersRaw.filter(oOrder => {
                     const bOrderMatches = oOrder.SystemStatusText && oOrder.SystemStatusText.startsWith("REL");
-
-                    if (bOrderMatches) {
-                        if (oOrder.to_MaintenanceOrderOperation && oOrder.to_MaintenanceOrderOperation.results) {
-                            oOrder.to_MaintenanceOrderOperation.results = oOrder.to_MaintenanceOrderOperation.results.filter(oOp => {
-                                return !oOp.SystemStatusText || !oOp.SystemStatusText.startsWith("CNF");
-                            });
-                        }
-                        return true;
-                    }
-                    return false;
-                });
-
-                const aFlatOrders = this._processOrders(aOrdersRaw);
-                this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
-
-                const aTimeEntries = await this.fetchActiveTimeEntries();
-                this.mergeTimeEntriesWithOrders(aTimeEntries);
-
-                this.startGlobalTimerInterval();
-                this.updatePanelVisibility();
-            } catch (err) {
-                MessageBox.error(err.message);
-            } finally {
-                this._setBusy(false);
-            }
-        },
-
-        loadOrdersAndTimeEntriesFiltered: async function (sOrderIdFilter) {
-            this._setBusy(true);
-            try {
-                let sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
-                if (sOrderIdFilter && sOrderIdFilter.length > 0) {
-                    sFilter += ` and substringof('${sOrderIdFilter}', MaintenanceOrder)`;
-                }
-
-                const sUrl = `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=${encodeURIComponent(sFilter)}&$expand=to_MaintenanceOrderOperation&$format=json`;
-
-                const response = await this._authenticatedFetch(sUrl);
-                const data = await response.json();
-                let aOrdersRaw = data.d ? data.d.results : [];
-
-                aOrdersRaw = aOrdersRaw.filter(oOrder => {
-                    const bOrderMatches = oOrder.SystemStatusText && oOrder.SystemStatusText.startsWith("REL");
-
                     if (bOrderMatches) {
                         if (oOrder.to_MaintenanceOrderOperation && oOrder.to_MaintenanceOrderOperation.results) {
                             oOrder.to_MaintenanceOrderOperation.results = oOrder.to_MaintenanceOrderOperation.results.filter(oOp => {
@@ -281,7 +196,7 @@ sap.ui.define([
                 const response = await this._authenticatedFetch(sUrl);
                 const data = await response.json();
                 const aAllResults = data.value || (data.d ? data.d.results : []);
-                return aAllResults.filter(item => item.Status === 'InProcess' || item.Status === 'Error');
+                return aAllResults.filter(item => item.Status === 'InProcess');
             } catch (e) {
                 console.error("Failed to fetch active time entries:", e);
                 return [];
@@ -292,34 +207,30 @@ sap.ui.define([
             const oOrdersModel = this.getOwnerComponent().getModel("orders");
             const aOrders = oOrdersModel.getProperty("/orders");
             let bHasChanges = false;
-
-            const sNowCST = this._toCSTIsoString(new Date());
-            const dNowCST = new Date(sNowCST);
+            const dNowLocal = new Date();
 
             aTimeEntries.forEach(oEntry => {
-                if (oEntry.Status !== 'InProcess') return;
-
                 const oOrder = aOrders.find(o =>
                     String(parseInt(o.orderId, 10)) === String(parseInt(oEntry.OrderID, 10)) &&
                     String(parseInt(o.operationId, 10)) === String(parseInt(oEntry.OperationSo, 10))
                 );
 
                 if (oOrder) {
-                    const sSapStartIso = `${oEntry.ExecStartDate}T${oEntry.ExecStartTime}`;
-                    const dSapStartCST = new Date(sSapStartIso);
+                    const dStartLocal = this._parseServerCSTToLocalDate(oEntry.ExecStartDate, oEntry.ExecStartTime);
 
-                    const iDiffSeconds = Math.round((dNowCST.getTime() - dSapStartCST.getTime()) / 1000);
-                    const nowLocal = new Date();
-                    const dLocalClockIn = new Date(nowLocal.getTime() - (iDiffSeconds * 1000));
+                    if (dStartLocal) {
+                        const iDiffMs = dNowLocal.getTime() - dStartLocal.getTime();
+                        const iDiffSeconds = Math.round(iDiffMs / 1000);
 
-                    oOrder.timerState = {
-                        elapsedSeconds: iDiffSeconds,
-                        baseElapsedSeconds: iDiffSeconds,
-                        isRunning: true,
-                        clockInTime: dLocalClockIn.toISOString(),
-                        timeEntryId: oEntry.SapUUID
-                    };
-                    bHasChanges = true;
+                        oOrder.timerState = {
+                            elapsedSeconds: iDiffSeconds,
+                            baseElapsedSeconds: iDiffSeconds,
+                            isRunning: true,
+                            clockInTime: dStartLocal.toISOString(),
+                            timeEntryId: oEntry.SapUUID
+                        };
+                        bHasChanges = true;
+                    }
                 }
             });
 
@@ -340,9 +251,9 @@ sap.ui.define([
                 aOrders.forEach((oOrder, iIndex) => {
                     if (oOrder.timerState.isRunning && oOrder.timerState.clockInTime) {
                         bAnyRunning = true;
+
                         const iStartTime = new Date(oOrder.timerState.clockInTime).getTime();
-                        const iBase = oOrder.timerState.baseElapsedSeconds || 0;
-                        const iTotalSeconds = Math.round(((iNow - iStartTime) / 1000));
+                        const iTotalSeconds = Math.round((iNow - iStartTime) / 1000);
 
                         if (oOrder.timerState.elapsedSeconds !== iTotalSeconds) {
                             oOrdersModel.setProperty(`/orders/${iIndex}/timerState/elapsedSeconds`, iTotalSeconds);
@@ -362,8 +273,11 @@ sap.ui.define([
             const oContext = oEvent.getSource().getBindingContext("orders");
             const sOrderId = oContext.getProperty("orderId");
             const sOperationId = oContext.getProperty("operationId");
+            const sActivityType = oContext.getProperty("activityType");
 
             const nowLocal = new Date();
+            const sDateTimeOffset = nowLocal.toISOString();
+            
             const cstIso = this._toCSTIsoString(nowLocal);
             const datePartCST = cstIso.slice(0, 10);
             const timePartCST = cstIso.slice(11, 19);
@@ -372,10 +286,12 @@ sap.ui.define([
                 "OrderID": sOrderId,
                 "OperationSo": sOperationId,
                 "UserID": this.getCurrentUserId(),
+                "ActTyp": sActivityType, 
                 "ExecStartDate": datePartCST,
                 "ExecStartTime": timePartCST,
                 "ExecFinDate": datePartCST,
                 "ExecFinTime": timePartCST,
+                "ClkInLog": sDateTimeOffset,
                 "Status": "InProcess"
             };
 
@@ -406,9 +322,22 @@ sap.ui.define([
         onClockOut: async function (oEvent) {
             this._setBusy(true);
             const oContext = oEvent.getSource().getBindingContext("orders");
+
             const sClockInTime = oContext.getProperty("timerState/clockInTime");
             const sTimeEntryUUID = oContext.getProperty("timerState/timeEntryId");
-            const iBaseElapsed = oContext.getProperty("timerState/baseElapsedSeconds") || 0;
+            const sActivityType = oContext.getProperty("activityType");
+
+            const bIsActive = await this._verifyEntryStatus(sTimeEntryUUID, "InProcess");
+            if (!bIsActive) {
+                MessageBox.error("This entry was updated in another session. Refreshing data.", {
+                    onClose: () => {
+                        this.loadOrdersAndTimeEntries();
+                        this.saveEntryToDrafts();
+                    }
+                });
+                this._setBusy(false);
+                return;
+            }
 
             if (!sClockInTime || !sTimeEntryUUID) {
                 MessageBox.error("No active timer found.");
@@ -419,11 +348,14 @@ sap.ui.define([
             const nowLocal = new Date();
             const startLocal = new Date(sClockInTime);
 
-            const iElapsedMs = nowLocal.getTime() - startLocal.getTime();
-            const iSessionSeconds = Math.round(iElapsedMs / 1000);
-            const iTotalSeconds = iBaseElapsed + iSessionSeconds;
+            if (isNaN(startLocal.getTime())) {
+                MessageBox.error("Invalid start time detected. Please refresh orders.");
+                this._setBusy(false);
+                return;
+            }
 
-            const dEffectiveStartLocal = new Date(nowLocal.getTime() - (iTotalSeconds * 1000));
+            const iElapsedMs = nowLocal.getTime() - startLocal.getTime();
+            const iTotalSeconds = Math.round(iElapsedMs / 1000);
             const fActualWorkHours = parseFloat((iTotalSeconds / 3600).toFixed(2));
 
             try {
@@ -431,7 +363,8 @@ sap.ui.define([
                 oDialogModel.setData({
                     OrderID: oContext.getProperty("orderId"),
                     OperationSo: oContext.getProperty("operationId"),
-                    workStartDate: dEffectiveStartLocal,
+                    ActivityType: sActivityType,
+                    workStartDate: startLocal,
                     workFinishDate: nowLocal,
                     actualWork: fActualWorkHours,
                     elapsedSeconds: iTotalSeconds,
@@ -487,178 +420,347 @@ sap.ui.define([
 
         postConfirmationToBAPI: async function (oData) {
             this._setBusy(true);
+            if (this.oSubmitDialog) {
+                this.oSubmitDialog.close();
+            }
 
+            const sEmployeeUrl = "/sap/bc/zfmcall/HR_GETEMPLOYEEDATA_FROMUSER";
             const sODataUrl = "/sap/opu/odata/sap/API_MAINTORDERCONFIRMATION/MaintOrderConfirmation";
 
             try {
-                const fetchResponse = await fetch(sODataUrl, {
-                    method: "GET",
-                    headers: {
-                        "X-CSRF-Token": "Fetch",
-                        "Accept": "application/json"
-                    },
-                    credentials: "include"
+                const employeeResponse = await fetch(sEmployeeUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username: this.getCurrentUserId() })
                 });
 
-                const sToken = fetchResponse.headers.get("x-csrf-token");
-                if (!sToken) {
-                    throw new Error("Could not fetch CSRF Token from API_MAINTORDERCONFIRMATION");
+                if (!employeeResponse.ok) throw new Error("Employee number not found");
+                const employeeData = await employeeResponse.json();
+                if (!employeeData || !employeeData.employeenumber || parseInt(employeeData.employeenumber, 10) === 0) {
+                    throw new Error("Employee number not found");
                 }
+                const sPersonnelNumber = employeeData.employeenumber;
 
-                const sOrderId = String(oData.OrderID).padStart(12, "0");
-                const sOperation = String(oData.OperationSo).padStart(4, "0");
+                await this._refreshCsrfToken();
+                if (!this._sCsrfToken) throw new Error("Could not fetch CSRF Token");
 
-                const startCSTIso = this._toCSTIsoString(oData.workStartDate);
-                const finishCSTIso = this._toCSTIsoString(oData.workFinishDate);
-
-                const toODataDate = (iso) => {
-                    const y = parseInt(iso.substring(0, 4), 10);
-                    const m = parseInt(iso.substring(5, 7), 10) - 1;
-                    const d = parseInt(iso.substring(8, 10), 10);
-                    const h = parseInt(iso.substring(11, 13), 10);
-                    const min = parseInt(iso.substring(14, 16), 10);
-                    const s = parseInt(iso.substring(17, 19), 10);
-                    const timestamp = Date.UTC(y, m, d, h, min, s);
-                    return `/Date(${timestamp})/`;
-                };
-
-                const toODataTime = (iso) => {
-                    const timePart = iso.slice(11, 19);
-                    const [h, m, s] = timePart.split(':');
-                    return `PT${h}H${m}M${s}S`;
-                };
-
-                let sActualWork = parseFloat(oData.actualWork || 0).toFixed(1);
-                if (sActualWork === "0.0" && oData.elapsedSeconds > 0) {
-                    sActualWork = "0.1";
-                }
-
-                const oPayload = {
-                    "MaintenanceOrder": sOrderId,
-                    "MaintenanceOrderOperation": sOperation,
-                    "PersonnelNumber": "00000000",
-                    "ActualWorkQuantity": sActualWork,
-                    "ActualWorkQuantityUnit": "H",
-                    "IsFinalConfirmation": oData.isFinalConfirmation || false,
-                    "ConfirmationText": oData.confirmationText || "",
-                    "PostingDate": toODataDate(this._toCSTIsoString(new Date())),
-                    "OperationConfirmedStartDate": toODataDate(startCSTIso),
-                    "OperationConfirmedStartTime": toODataTime(startCSTIso),
-                    "OperationConfirmedEndDate": toODataDate(finishCSTIso),
-                    "OperationConfirmedEndTime": toODataTime(finishCSTIso)
-                };
-
-                const sPostUrl = sODataUrl;
-
-                const response = await fetch(sPostUrl, {
+                const oPrimaryPayload = this._buildConfirmationPayload(oData, sPersonnelNumber, false);
+                 
+                const responsePrimary = await fetch(sODataUrl, {
                     method: "POST",
                     headers: {
                         "Content-Type": "application/json",
                         "Accept": "application/json",
-                        "X-CSRF-Token": sToken
+                        "X-CSRF-Token": this._sCsrfToken
                     },
-                    body: JSON.stringify(oPayload),
+                    body: JSON.stringify(oPrimaryPayload),
                     credentials: "include"
                 });
 
-                const responseData = await response.json();
+                const responseDataPrimary = await responsePrimary.json();
+                if (!responsePrimary.ok) {
+                    throw new Error(this._extractErrorMessage(responseDataPrimary));
+                }
 
-                if (response.ok) {
-                    const result = responseData.d || responseData;
-                    const sConfNum = result.MaintOrderConf;
-                    const sConfCntr = result.MaintOrderConfCntrValue;
+                const resultPrimary = responseDataPrimary.d || responseDataPrimary;
+                const sCnfNo = resultPrimary.MaintOrderConf;
+                const sCnfCntr = resultPrimary.MaintOrderConfCntrValue;
 
-                    sap.m.MessageBox.success(
-                        `Saved Successfully!\nConfirmation #: ${sConfNum}\nCounter: ${sConfCntr}`,
-                        {
-                            onClose: async () => {
-                                if (oData.contextPath && oData.timeEntryId) {
-                                    const oOrdersModel = this.getOwnerComponent().getModel("orders");
-                                    const oContext = oOrdersModel.createBindingContext(oData.contextPath);
-                                    this.stopSpecificTimer(oContext);
-                                }
+                if (oData.contextPath) {
+                    const oOrdersModel = this.getOwnerComponent().getModel("orders");
+                    const oContext = oOrdersModel.createBindingContext(oData.contextPath);
+                    this.stopSpecificTimer(oContext);
+                }
 
-                                if (oData.timeEntryId) {
-                                    await this.updateTimeEntryOnServerByUUID(
-                                        oData.timeEntryId,
-                                        oData.workStartDate,
-                                        oData.workFinishDate,
-                                        "Completed"
-                                    );
-                                }
-                                this.onCloseDialog();
-                            }
-                        }
-                    );
+                await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
+                    CnfNo: sCnfNo,
+                    CnfCntr: sCnfCntr,
+                    Status: "PrimaryDone",
+                    workFinishDate: oData.workFinishDate,
+                    ActWrk: parseFloat(oData.actualWork), 
+                    Arbeh: "H" 
+                });
 
-                } else {
-                    let sErrorMessage = "Unknown Error";
+                try {
+                    const oOverheadPayload = this._buildConfirmationPayload(oData, sPersonnelNumber, true); 
+                    
+                    const responseOverhead = await fetch(sODataUrl, {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Accept": "application/json",
+                            "X-CSRF-Token": this._sCsrfToken
+                        },
+                        body: JSON.stringify(oOverheadPayload),
+                        credentials: "include"
+                    });
 
-                    try {
-                        if (responseData.error && responseData.error.message) {
-                            sErrorMessage = responseData.error.message.value;
-                        }
-
-                        if (responseData.error && responseData.error.innererror && responseData.error.innererror.errordetails) {
-                            const details = responseData.error.innererror.errordetails;
-                            if (details.length > 0) {
-                                const firstDetail = details.find(d => d.severity === "error");
-                                if (firstDetail) {
-                                    sErrorMessage = firstDetail.message;
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        sErrorMessage = "Failed to parse error response.";
+                    const responseDataOverhead = await responseOverhead.json();
+                    if (!responseOverhead.ok) {
+                          throw new Error(this._extractErrorMessage(responseDataOverhead));
                     }
 
-                    throw new Error(sErrorMessage);
+                    const resultOverhead = responseDataOverhead.d || responseDataOverhead;
+                    
+                    await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
+                        OcnfNo: resultOverhead.MaintOrderConf,
+                        OcnfCntr: resultOverhead.MaintOrderConfCntrValue,
+                        OvrHd: "X",
+                        Status: "Completed"
+                    });
+
+                    sap.m.MessageBox.success(`Time & Overhead Saved Successfully!\nConf: ${sCnfNo}, Overhead: ${resultOverhead.MaintOrderConf}`, {
+                        onClose: () => this.onCloseDialog()
+                    });
+
+                } catch (overheadError) {
+                    await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
+                        Status: "OverheadError"
+                    });
+                    sap.m.MessageBox.warning(`Primary Confirmation Saved (${sCnfNo}), but Overhead failed: ${overheadError.message}. Please retry from Overhead Failures panel.`, {
+                          onClose: () => this.onCloseDialog()
+                    });
                 }
 
             } catch (error) {
                 sap.m.MessageBox.error(`Confirmation Failed: ${error.message}`);
-                this.onCloseWithError(oData);
+                this.onCloseWithError(oData, "Error");
             } finally {
                 this._setBusy(false);
             }
         },
 
-        updateTimeEntryOnServerByUUID: async function (sSapUUID, startDateLocal, finishDateLocal, sStatus) {
+        onPostOverheadFailure: async function(oEvent) {
+             const oDraft = oEvent.getSource().getBindingContext("overheadFailures").getObject();
+             
+             const bValid = await this._verifyEntryStatus(oDraft.SapUUID, "OverheadError");
+             if (!bValid) {
+                 MessageBox.error("This entry was modified in another session. Refreshing data.", {
+                     onClose: () => {
+                         this.loadOrdersAndTimeEntries();
+                         this.saveEntryToDrafts();
+                     }
+                 });
+                 return;
+             }
+
+             this._setBusy(true);
+             const sEmployeeUrl = "/sap/bc/zfmcall/HR_GETEMPLOYEEDATA_FROMUSER";
+
+             try {
+                const employeeResponse = await fetch(sEmployeeUrl, {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ username: this.getCurrentUserId() })
+                });
+
+                if (!employeeResponse.ok) throw new Error("Employee number not found");
+                const employeeData = await employeeResponse.json();
+                const sPersonnelNumber = employeeData.employeenumber;
+
+                await this._refreshCsrfToken();
+                if (!this._sCsrfToken) throw new Error("Could not fetch CSRF Token");
+
+                const dStart = this._parseServerCSTToLocalDate(oDraft.ExecStartDate, oDraft.ExecStartTime);
+                const dEnd = this._parseServerCSTToLocalDate(oDraft.ExecFinDate, oDraft.ExecFinTime);
+                const iDiffMs = dEnd.getTime() - dStart.getTime();
+                const iTotalSeconds = Math.round(iDiffMs / 1000);
+                
+                const fActualWork = parseFloat(oDraft.ActWrk);
+
+                const oData = {
+                    OrderID: oDraft.OrderID,
+                    OperationSo: oDraft.OperationSo,
+                    workStartDate: dStart,
+                    workFinishDate: dEnd,
+                    actualWork: fActualWork,
+                    elapsedSeconds: iTotalSeconds,
+                    isFinalConfirmation: false,
+                    confirmationText: ""
+                };
+
+                const oOverheadPayload = this._buildConfirmationPayload(oData, sPersonnelNumber, true);
+                const sODataUrl = "/sap/opu/odata/sap/API_MAINTORDERCONFIRMATION/MaintOrderConfirmation";
+
+                const responseOverhead = await fetch(sODataUrl, {
+                    method: "POST",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "Accept": "application/json",
+                        "X-CSRF-Token": this._sCsrfToken
+                    },
+                    body: JSON.stringify(oOverheadPayload),
+                    credentials: "include"
+                });
+
+                const responseDataOverhead = await responseOverhead.json();
+                if (!responseOverhead.ok) {
+                      throw new Error(this._extractErrorMessage(responseDataOverhead));
+                }
+
+                const resultOverhead = responseDataOverhead.d || responseDataOverhead;
+                
+                await this.updateTimeEntryOnServerByUUID(oDraft.SapUUID, {
+                    OcnfNo: resultOverhead.MaintOrderConf,
+                    OcnfCntr: resultOverhead.MaintOrderConfCntrValue,
+                    OvrHd: "X",
+                    Status: "Completed"
+                });
+
+                MessageToast.show(`Overhead Confirmed: ${resultOverhead.MaintOrderConf}`);
+                this.saveEntryToDrafts();
+
+             } catch (e) {
+                 MessageBox.error("Overhead Retry Failed: " + e.message);
+             } finally {
+                 this._setBusy(false);
+             }
+        },
+
+        _buildConfirmationPayload: function(oData, sPersonnelNumber, bIsOverhead) {
+            const sOrderId = String(oData.OrderID).padStart(12, "0");
+            const sOperation = String(oData.OperationSo).padStart(4, "0");
+            const startCSTIso = this._toCSTIsoString(oData.workStartDate);
+            const finishCSTIso = this._toCSTIsoString(oData.workFinishDate);
+
+            const toODataDate = (iso) => {
+                const y = parseInt(iso.substring(0, 4), 10);
+                const m = parseInt(iso.substring(5, 7), 10) - 1;
+                const d = parseInt(iso.substring(8, 10), 10);
+                const h = parseInt(iso.substring(11, 13), 10);
+                const min = parseInt(iso.substring(14, 16), 10);
+                const s = parseInt(iso.substring(17, 19), 10);
+                return `/Date(${Date.UTC(y, m, d, h, min, s)})/`;
+            };
+
+            const toODataTime = (iso) => {
+                const timePart = iso.slice(11, 19);
+                const [h, m, s] = timePart.split(':');
+                return `PT${h}H${m}M${s}S`;
+            };
+
+            let sActualWork = parseFloat(oData.actualWork || 0).toFixed(1);
+            if (parseFloat(sActualWork) === 0.0 && oData.elapsedSeconds > 60) {
+                sActualWork = "0.1";
+            }
+
+            const oPayload = {
+                "MaintenanceOrder": sOrderId,
+                "MaintenanceOrderOperation": sOperation,
+                "PersonnelNumber": sPersonnelNumber,
+                "ActualWorkQuantity": sActualWork,
+                "ActualWorkQuantityUnit": "H",
+                "IsFinalConfirmation": oData.isFinalConfirmation || false,
+                "ConfirmationText": oData.confirmationText || "",
+                "PostingDate": toODataDate(this._toCSTIsoString(new Date())),
+                "OperationConfirmedStartDate": toODataDate(startCSTIso),
+                "OperationConfirmedStartTime": toODataTime(startCSTIso),
+                "OperationConfirmedEndDate": toODataDate(finishCSTIso),
+                "OperationConfirmedEndTime": toODataTime(finishCSTIso),
+                "ActivityType":oData.ActivityType
+            };
+
+            if (bIsOverhead) {
+                oPayload.ActivityType = "OVRHD"; 
+                oPayload.ConfirmationText = "Overhead: " + (oData.confirmationText || "");
+            }
+
+            return oPayload;
+        },
+
+        _extractErrorMessage: function(responseData) {
+            let sErrorMessage = "Unknown Error";
+            try {
+                if (responseData.error && responseData.error.message) {
+                    sErrorMessage = responseData.error.message.value;
+                }
+                if (responseData.error?.innererror?.errordetails?.length > 0) {
+                    const firstErr = responseData.error.innererror.errordetails.find(d => d.severity === "error");
+                    if (firstErr) sErrorMessage = firstErr.message;
+                }
+            } catch (e) { }
+            return sErrorMessage;
+        },
+
+        _authenticatedFetch: async function (url, method = "GET", body = null, isRetry = false) {
+            const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
+            if (method !== "GET") {
+                if (!this._sCsrfToken) await this._refreshCsrfToken();
+                if (this._sCsrfToken) headers['X-CSRF-Token'] = this._sCsrfToken;
+            }
+
+            const options = { method: method, headers: headers, credentials: 'include' };
+            if (body) options.body = JSON.stringify(body);
+
+            try {
+                const response = await fetch(url, options);
+                if ((response.status === 403 || response.headers.get("x-csrf-token") === "Required") && !isRetry) {
+                    await this._refreshCsrfToken();
+                    return this._authenticatedFetch(url, method, body, true);
+                }
+                if (!response.ok) {
+                    const txt = await response.text();
+                    throw new Error(`HTTP ${response.status}: ${txt}`);
+                }
+                return response;
+            } catch (error) { throw error; }
+        },
+
+        _refreshCsrfToken: async function () {
+            try {
+                const response = await fetch(this.sHanaServiceUrl, {
+                    method: "GET",
+                    headers: { "X-CSRF-Token": "Fetch", "Accept": "application/json" },
+                    credentials: 'include'
+                });
+                const token = response.headers.get("X-CSRF-Token");
+                if (token) this._sCsrfToken = token;
+            } catch (e) { console.error("CSRF Fetch Error", e); }
+        },
+
+        updateTimeEntryOnServerByUUID: async function (sSapUUID, oAttributes) {
             this._setBusy(true);
             const sEntryUrl = `${this.sHanaServiceUrl}(${encodeURIComponent(sSapUUID)})`;
 
             try {
                 if (!this._sCsrfToken) await this._refreshCsrfToken();
 
-                const oPayload = { Status: sStatus };
-                if (startDateLocal) {
-                    const scstIso = this._toCSTIsoString(startDateLocal);
-                    oPayload.ExecStartDate = scstIso.slice(0, 10);
-                    oPayload.ExecStartTime = scstIso.slice(11, 19);
+                const oPayload = { ...oAttributes }; 
+                
+                if (oAttributes.workStartDate) {
+                    const cst = this._toCSTIsoString(oAttributes.workStartDate);
+                    oPayload.ExecStartDate = cst.slice(0, 10);
+                    oPayload.ExecStartTime = cst.slice(11, 19);
+                    delete oPayload.workStartDate;
                 }
-                if (finishDateLocal) {
-                    const cstIso = this._toCSTIsoString(finishDateLocal);
-                    oPayload.ExecFinDate = cstIso.slice(0, 10);
-                    oPayload.ExecFinTime = cstIso.slice(11, 19);
+                if (oAttributes.workFinishDate) {
+                    const cst = this._toCSTIsoString(oAttributes.workFinishDate);
+                    oPayload.ExecFinDate = cst.slice(0, 10);
+                    oPayload.ExecFinTime = cst.slice(11, 19);
+                    
+                    oPayload.ClkOutLog = oAttributes.workFinishDate.toISOString();
+
+                    delete oPayload.workFinishDate;
                 }
 
                 const resHead = await this._authenticatedFetch(sEntryUrl, "GET");
                 const oData = await resHead.json();
-                const eTag = resHead.headers.get("ETag") || (oData.d && oData.d.__metadata ? oData.d.__metadata.etag : null);
+                const eTag = resHead.headers.get("ETag") || (oData.d?.__metadata?.etag) || (oData['@odata.etag']);
 
                 await fetch(sEntryUrl, {
                     method: "PATCH",
                     headers: {
                         "Content-Type": "application/json",
                         "X-CSRF-Token": this._sCsrfToken,
-                        "If-Match": eTag
+                        "If-Match": eTag || "*"
                     },
                     body: JSON.stringify(oPayload),
                     credentials: 'include'
                 });
 
             } catch (e) {
-                console.error("Error updating time entry status on server:", e);
+                console.error("Error updating time entry on server:", e);
+                throw e;
             } finally {
                 this._setBusy(false);
             }
@@ -685,17 +787,53 @@ sap.ui.define([
         onSearchOrders: function () {
             const oSearchField = this.byId("orderIdSearch");
             const sQuery = oSearchField ? oSearchField.getValue().trim() : "";
-
-            if (this.filterDebounceTimer) {
-                clearTimeout(this.filterDebounceTimer);
-            }
-            this.filterDebounceTimer = setTimeout(() => {
+            if (this._filterDebounceTimer) clearTimeout(this._filterDebounceTimer);
+            this._filterDebounceTimer = setTimeout(() => {
                 if (!sQuery || sQuery.length < 3) {
                     this.loadOrdersAndTimeEntries();
                 } else {
                     this.loadOrdersAndTimeEntriesFiltered(sQuery);
                 }
             }, 400);
+        },
+
+        loadOrdersAndTimeEntriesFiltered: async function (sOrderIdFilter) {
+            this._setBusy(true);
+            try {
+                let sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
+                if (sOrderIdFilter && sOrderIdFilter.length > 0) {
+                    sFilter += ` and substringof('${sOrderIdFilter}', MaintenanceOrder)`;
+                }
+                const sUrl = `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=${encodeURIComponent(sFilter)}&$expand=to_MaintenanceOrderOperation&$format=json`;
+
+                const response = await this._authenticatedFetch(sUrl);
+                const data = await response.json();
+                let aOrdersRaw = data.d ? data.d.results : [];
+
+                aOrdersRaw = aOrdersRaw.filter(oOrder => {
+                    const bOrderMatches = oOrder.SystemStatusText && oOrder.SystemStatusText.startsWith("REL");
+                    if (bOrderMatches) {
+                        if (oOrder.to_MaintenanceOrderOperation && oOrder.to_MaintenanceOrderOperation.results) {
+                            oOrder.to_MaintenanceOrderOperation.results = oOrder.to_MaintenanceOrderOperation.results.filter(oOp => {
+                                return !oOp.SystemStatusText || !oOp.SystemStatusText.startsWith("CNF");
+                            });
+                        }
+                        return true;
+                    }
+                    return false;
+                });
+
+                const aFlatOrders = this._processOrders(aOrdersRaw);
+                this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
+                const aTimeEntries = await this.fetchActiveTimeEntries();
+                this.mergeTimeEntriesWithOrders(aTimeEntries);
+                this.startGlobalTimerInterval();
+                this.updatePanelVisibility();
+            } catch (err) {
+                MessageBox.error(err.message);
+            } finally {
+                this._setBusy(false);
+            }
         },
 
         onRefreshOrders: function () {
@@ -705,16 +843,14 @@ sap.ui.define([
 
         onSelectOrder: function (oEvent) {
             const oContext = oEvent.getSource().getBindingContext("orders");
-            const sOrderId = oContext.getProperty("orderId");
-            const sOperationId = oContext.getProperty("operationId");
-
-            const oActiveTimerModel = this.getView().getModel("activeTimer");
-            const sCurrentActiveId = oActiveTimerModel.getProperty("/activeOrderId");
-            const sCurrentActiveOp = oActiveTimerModel.getProperty("/activeOperationId");
-
             if (oContext.getProperty("timerState/isRunning")) return;
 
-            if (sCurrentActiveId === sOrderId && sCurrentActiveOp === sOperationId) {
+            const sOrderId = oContext.getProperty("orderId");
+            const sOperationId = oContext.getProperty("operationId");
+            const oActiveTimerModel = this.getView().getModel("activeTimer");
+
+            if (oActiveTimerModel.getProperty("/activeOrderId") === sOrderId &&
+                oActiveTimerModel.getProperty("/activeOperationId") === sOperationId) {
                 oActiveTimerModel.setProperty("/activeOrderId", null);
                 oActiveTimerModel.setProperty("/activeOperationId", null);
             } else {
@@ -726,25 +862,23 @@ sap.ui.define([
         onClose: function () {
             const oDialogModel = this.getView().getModel("dialog");
             const oData = oDialogModel.getData();
-            this.onCloseWithError(oData);
+            this.onCloseWithError(oData, "Error");
         },
 
-        onCloseWithError: async function (oData) {
+        onCloseWithError: async function (oData, sStatus) {
             if (oData.contextPath && oData.timeEntryId) {
                 const oOrdersModel = this.getOwnerComponent().getModel("orders");
                 const oContext = oOrdersModel.createBindingContext(oData.contextPath);
                 this.stopSpecificTimer(oContext);
 
-                try {
-                    await this.updateTimeEntryOnServerByUUID(
-                        oData.timeEntryId,
-                        oData.workStartDate,
-                        oData.workFinishDate,
-                        "Error"
-                    );
-                } catch (e) {
-                    console.error("Failed to mark time entry as Error on server:", e);
-                }
+                await this.updateTimeEntryOnServerByUUID(
+                    oData.timeEntryId,
+                    {
+                        workStartDate: oData.workStartDate,
+                        workFinishDate: oData.workFinishDate,
+                        Status: sStatus
+                    }
+                );
             }
             this.onCloseDialog();
         },
@@ -768,62 +902,64 @@ sap.ui.define([
             return new Date(ms).toISOString().slice(0, 19);
         },
 
-        formatDateForBAPI: function (oDate) {
-            if (!oDate) return "";
-            var d = new Date(oDate);
-            var year = d.getFullYear();
-            var month = ("0" + (d.getMonth() + 1)).slice(-2);
-            var day = ("0" + d.getDate()).slice(-2);
-            return year + "-" + month + "-" + day;
-        },
-
         saveEntryToDrafts: async function () {
             const sUserId = this.getCurrentUserId();
             const sUrl = `${this.sHanaServiceUrl}?$filter=UserID eq '${sUserId}'&$format=json`;
-
             try {
                 const response = await this._authenticatedFetch(sUrl);
                 const data = await response.json();
                 const aAllResults = data.value || (data.d ? data.d.results : []);
-
-                const aErrorEntries = aAllResults.filter(item => item.Status === 'Error');
-
-                aErrorEntries.forEach(item => {
-                    try {
-                        const sStart = `${item.ExecStartDate}T${item.ExecStartTime}`;
-                        const sEnd = `${item.ExecFinDate}T${item.ExecFinTime}`;
-                        const diff = (new Date(sEnd) - new Date(sStart)) / 1000;
-                        const h = Math.floor(diff / 3600);
-                        const m = Math.floor((diff % 3600) / 60);
-                        item.formattedTime = `${h}:${m < 10 ? '0' + m : m}`;
+                
+                const processEntry = (item) => {
+                    const dStart = this._parseServerCSTToLocalDate(item.ExecStartDate, item.ExecStartTime);
+                    const dEnd = this._parseServerCSTToLocalDate(item.ExecFinDate, item.ExecFinTime);
+                    if (dStart && dEnd) {
+                        const diff = (dEnd - dStart) / 1000;
                         item.actualWorkHours = parseFloat((diff / 3600).toFixed(2));
-                    } catch (e) {
+                        let h = Math.floor(diff / 3600);
+                        let m = Math.floor((diff % 3600) / 60);
+                        item.formattedTime = `${h}:${m < 10 ? '0' + m : m}`;
+                    } else {
                         item.formattedTime = "--:--";
                         item.actualWorkHours = 0;
                     }
-                });
+                    return item;
+                };
+
+                const aErrorEntries = aAllResults.filter(item => item.Status === 'Error').map(processEntry);
+                const aOverheadErrorEntries = aAllResults.filter(item => item.Status === 'OverheadError').map(processEntry);
 
                 this.getOwnerComponent().getModel("drafts").setProperty("/entries", aErrorEntries);
+                this.getOwnerComponent().getModel("overheadFailures").setProperty("/entries", aOverheadErrorEntries);
+
             } catch (e) {
                 console.error("Failed to load drafts:", e);
             }
         },
 
-        onPostDraft: function (oEvent) {
+        onPostDraft: async function (oEvent) {
             const oDraft = oEvent.getSource().getBindingContext("drafts").getObject();
+            
+            const bValid = await this._verifyEntryStatus(oDraft.SapUUID, "Error");
+            if (!bValid) {
+                 MessageBox.error("This entry was modified in another session. Refreshing data.", {
+                     onClose: () => {
+                         this.loadOrdersAndTimeEntries();
+                         this.saveEntryToDrafts();
+                     }
+                 });
+                 return;
+            }
 
-            const sStartIso = `${oDraft.ExecStartDate}T${oDraft.ExecStartTime}`;
-            const sEndIso = `${oDraft.ExecFinDate}T${oDraft.ExecFinTime}`;
-
-            const dStart = this._parseCSTIsoToDate(sStartIso);
-            const dEnd = this._parseCSTIsoToDate(sEndIso);
-
+            const dStart = this._parseServerCSTToLocalDate(oDraft.ExecStartDate, oDraft.ExecStartTime);
+            const dEnd = this._parseServerCSTToLocalDate(oDraft.ExecFinDate, oDraft.ExecFinTime);
             const iDiffMs = dEnd.getTime() - dStart.getTime();
             const iTotalSeconds = Math.round(iDiffMs / 1000);
 
             const oDialogData = {
                 OrderID: oDraft.OrderID,
                 OperationSo: oDraft.OperationSo,
+                ActivityType: oDraft.ActTyp,
                 workStartDate: dStart,
                 workFinishDate: dEnd,
                 actualWork: oDraft.actualWorkHours,
@@ -834,42 +970,39 @@ sap.ui.define([
                 contextPath: null
             };
 
-            const oDialogModel = this.getView().getModel("dialog");
-            oDialogModel.setData(oDialogData);
-
+            this.getView().getModel("dialog").setData(oDialogData);
             this.openSubmitDialog();
         },
 
-        onDeleteDraft: function (oEvent) {
-            const oContext = oEvent.getSource().getBindingContext("drafts");
+        onDeleteDraft: async function (oEvent) {
+            const sModelName = oEvent.getSource().getBindingContext("overheadFailures") ? "overheadFailures" : "drafts";
+            const oContext = oEvent.getSource().getBindingContext(sModelName);
             const oDraft = oContext.getObject();
 
-            MessageBox.confirm("Are you sure you want to permanently delete this draft entry?", {
+            const sExpectedStatus = sModelName === "overheadFailures" ? "OverheadError" : "Error";
+            const bValid = await this._verifyEntryStatus(oDraft.SapUUID, sExpectedStatus);
+            
+            if (!bValid) {
+                 MessageBox.error("This entry was modified in another session. Refreshing data.", {
+                     onClose: () => {
+                         this.loadOrdersAndTimeEntries();
+                         this.saveEntryToDrafts();
+                     }
+                 });
+                 return;
+            }
+
+            MessageBox.confirm("Permanently delete draft?", {
                 onClose: async (sAction) => {
                     if (sAction === MessageBox.Action.OK) {
                         try {
-                            this._setBusy(true);
-                            await this.updateTimeEntryOnServerByUUID(oDraft.SapUUID, null, null, "Deleted");
+                            await this.updateTimeEntryOnServerByUUID(oDraft.SapUUID, { Status: "Deleted" });
                             this.saveEntryToDrafts();
                             MessageToast.show("Draft deleted");
-                        } catch (e) {
-                            MessageBox.error("Failed to delete draft: " + e.message);
-                        } finally {
-                            this._setBusy(false);
-                        }
+                        } catch (e) { MessageBox.error(e.message); }
                     }
                 }
             });
-        },
-
-        _toLocalIsoString: function (date) {
-            const pad = function (num) { return (num < 10 ? '0' : '') + num; };
-            return date.getFullYear() +
-                '-' + pad(date.getMonth() + 1) +
-                '-' + pad(date.getDate()) +
-                'T' + pad(date.getHours()) +
-                ':' + pad(date.getMinutes()) +
-                ':' + pad(date.getSeconds());
         }
     });
 });

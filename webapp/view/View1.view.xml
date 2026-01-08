@@ -38,6 +38,35 @@
                     </content>
                 </Panel>
 
+                <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop" 
+    visible="{= ${overheadFailures>/entries}.length > 0 }">
+    <headerToolbar>
+        <Toolbar>
+            <Title text="Overhead Errors ({= ${overheadFailures>/entries}.length })"/>
+        </Toolbar>
+    </headerToolbar>
+    <content>
+        <List items="{overheadFailures>/entries}" noDataText="No overhead errors." showSeparators="None" backgroundDesign="Transparent">
+            <CustomListItem>
+                <HBox class="savedEntryCard" alignItems="Center" justifyContent="SpaceBetween">
+                    <HBox alignItems="Center">
+                        <core:Icon size="2rem" src="sap-icon://alert" color="Negative" class="sapUiMediumMarginEnd"/>
+                        <VBox>
+                            <Title text="ACT: {overheadFailures>OperationSo} (Overhead Failed)" level="H4"/>
+                            <Text text="ORD: {path: 'overheadFailures>OrderID', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
+                            <Text text="Main Conf #: {overheadFailures>CnfNo}" class="cardSubtitle"/>
+                        </VBox>
+                    </HBox>
+                    <HBox>
+                        <Button text="Retry Overhead" type="Critical" press=".onPostOverheadFailure" class="sapUiTinyMarginEnd"/>
+                        <Button icon="sap-icon://delete" type="Transparent" press=".onDeleteDraft"/>
+                    </HBox>
+                </HBox>
+            </CustomListItem>
+        </List>
+    </content>
+</Panel>
+
                 <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop" visible="{viewState>/isProgressPanelVisible}">
                     <headerToolbar>
                         <Toolbar>
@@ -82,7 +111,6 @@
                             <Title text="Open Operations"/>
                             <ToolbarSpacer/>
                             <SearchField width="40%" id="orderIdSearch" placeholder="OrderID" search=".onSearchOrders"/>
-
                         </Toolbar>
                     </headerToolbar>
                     <content>
