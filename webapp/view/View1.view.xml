@@ -38,34 +38,33 @@
                     </content>
                 </Panel>
 
-                <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop" 
-    visible="{= ${overheadFailures>/entries}.length > 0 }">
-    <headerToolbar>
-        <Toolbar>
-            <Title text="Overhead Errors ({= ${overheadFailures>/entries}.length })"/>
-        </Toolbar>
-    </headerToolbar>
-    <content>
-        <List items="{overheadFailures>/entries}" noDataText="No overhead errors." showSeparators="None" backgroundDesign="Transparent">
-            <CustomListItem>
-                <HBox class="savedEntryCard" alignItems="Center" justifyContent="SpaceBetween">
-                    <HBox alignItems="Center">
-                        <core:Icon size="2rem" src="sap-icon://alert" color="Negative" class="sapUiMediumMarginEnd"/>
-                        <VBox>
-                            <Title text="ACT: {overheadFailures>OperationSo} (Overhead Failed)" level="H4"/>
-                            <Text text="ORD: {path: 'overheadFailures>OrderID', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
-                            <Text text="Main Conf #: {overheadFailures>CnfNo}" class="cardSubtitle"/>
-                        </VBox>
-                    </HBox>
-                    <HBox>
-                        <Button text="Retry Overhead" type="Critical" press=".onPostOverheadFailure" class="sapUiTinyMarginEnd"/>
-                        <Button icon="sap-icon://delete" type="Transparent" press=".onDeleteDraft"/>
-                    </HBox>
-                </HBox>
-            </CustomListItem>
-        </List>
-    </content>
-</Panel>
+                <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop" visible="{= ${overheadFailures>/entries}.length > 0 }">
+                    <headerToolbar>
+                        <Toolbar>
+                            <Title text="Overhead Errors ({= ${overheadFailures>/entries}.length })"/>
+                        </Toolbar>
+                    </headerToolbar>
+                    <content>
+                        <List items="{overheadFailures>/entries}" noDataText="No overhead errors." showSeparators="None" backgroundDesign="Transparent">
+                            <CustomListItem>
+                                <HBox class="savedEntryCard" alignItems="Center" justifyContent="SpaceBetween">
+                                    <HBox alignItems="Center">
+                                        <core:Icon size="2rem" src="sap-icon://alert" color="Negative" class="sapUiMediumMarginEnd"/>
+                                        <VBox>
+                                            <Title text="ACT: {overheadFailures>OperationSo} (Overhead Failed)" level="H4"/>
+                                            <Text text="ORD: {path: 'overheadFailures>OrderID', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
+                                            <Text text="Main Conf #: {overheadFailures>CnfNo}" class="cardSubtitle"/>
+                                        </VBox>
+                                    </HBox>
+                                    <HBox>
+                                        <Button text="Retry Overhead" type="Critical" press=".onPostOverheadFailure" class="sapUiTinyMarginEnd"/>
+                                        <Button icon="sap-icon://delete" type="Transparent" press=".onDeleteDraft"/>
+                                    </HBox>
+                                </HBox>
+                            </CustomListItem>
+                        </List>
+                    </content>
+                </Panel>
 
                 <Panel expandable="true" expanded="true" backgroundDesign="Transparent" class="sapUiNoContentPadding sapUiMediumMarginTop" visible="{viewState>/isProgressPanelVisible}">
                     <headerToolbar>
@@ -74,11 +73,7 @@
                         </Toolbar>
                     </headerToolbar>
                     <content>
-                        <List 
-                            id="inProgressList" 
-                            items="{orders>/orders}" 
-                            showSeparators="None" 
-                            backgroundDesign="Transparent">
+                        <List id="inProgressList" items="{orders>/orders}" showSeparators="None" backgroundDesign="Transparent">
                             <CustomListItem type="Active" press=".onSelectOrder" visible="{orders>timerState/isRunning}">
                                 <VBox class="customCard runningCard">
                                     <FlexBox justifyContent="SpaceBetween" alignItems="Start">
@@ -114,15 +109,7 @@
                         </Toolbar>
                     </headerToolbar>
                     <content>
-                        <List 
-                            id="ordersList" 
-                            items="{orders>/orders}" 
-                            noDataText="No open operations" 
-                            showSeparators="None" 
-                            backgroundDesign="Transparent"
-                            growing="true"
-                            growingThreshold="20"
-                            growingScrollToLoad="true">
+                        <List id="ordersList" items="{orders>/orders}" noDataText="No open operations" showSeparators="None" backgroundDesign="Transparent" growing="true" growingThreshold="20" growingScrollToLoad="true">
                             <CustomListItem type="Active" press=".onSelectOrder" visible="{= !${orders>timerState/isRunning} }">
                                 <VBox class="customCard">
                                     <FlexBox justifyContent="SpaceBetween" alignItems="Start">
@@ -144,9 +131,22 @@
                                             <Label text="Activity Type" />
                                             <Text text="{orders>activityType}" />
                                             <Label text="Earliest Start" />
-                                            <Text text="{path: 'orders>reqStartDate', type: 'sap.ui.model.type.DateTime', formatOptions: { style: 'medium', source: { pattern: 'yyyy-MM-ddTHH:mm:ss' } } }" />
+                                            <Text text="{
+    path: 'orders>reqStartDate',
+    type: 'sap.ui.model.type.DateTime',
+    formatOptions: {
+        style: 'medium'
+    }
+}" />
+
                                             <Label text="Earliest Finish" />
-                                            <Text text="{path: 'orders>reqEndDate', type: 'sap.ui.model.type.DateTime', formatOptions: { style: 'medium', source: { pattern: 'yyyy-MM-ddTHH:mm:ss' } } }" />
+                                            <Text text="{
+    path: 'orders>reqEndDate',
+    type: 'sap.ui.model.type.DateTime',
+    formatOptions: {
+        style: 'medium'
+    }
+}" />
                                         </f:SimpleForm>
 
                                         <VBox class="timer-container-inactive" alignItems="Center">
@@ -162,3 +162,4 @@
         </Page>
     </Shell>
 </mvc:View>
+

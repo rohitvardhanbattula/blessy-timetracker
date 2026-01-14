@@ -12,12 +12,16 @@ sap.ui.define([
         _oSubmitDialog: null,
         _sCsrfToken: null,
         _filterDebounceTimer: null,
+        _sPersonnelNumber: null, // Cache for Employee Number
         sHanaServiceUrl: "/sap/opu/odata4/sap/zapi_cs_cio_tt_o4/srvd_a2x/sap/zapi_cs_cio_tt_o4/0001/ZC_CS_CIO_TT",
 
         onInit: function () {
             this._initializeUserId().then(() => {
                 this._initModels();
+                // Load data
                 this.loadOrdersAndTimeEntries();
+                // Pre-fetch personnel number in background to speed up Submit later
+                this._fetchPersonnelNumber().catch(() => { });
             });
         },
 
@@ -56,7 +60,7 @@ sap.ui.define([
         },
 
         getCurrentUserId: function () {
-            return this.sUserIdFLP || 'Undefined';
+            return this.sUserIdFLP;
         },
 
         _initializeUserId: function () {
@@ -72,6 +76,7 @@ sap.ui.define([
             });
         },
 
+        /* --- Date Handling Helpers (CST <-> Local) --- */
         _toCSTIsoString: function (oDate) {
             const d = oDate || new Date();
             const options = {
@@ -106,30 +111,36 @@ sap.ui.define([
             return dCorrectedLocal;
         },
 
-        _verifyEntryStatus: async function(sSapUUID, sExpectedStatus) {
+        _verifyEntryStatus: async function (sSapUUID, sExpectedStatus) {
             if (!sSapUUID) return false;
             const sUrl = `${this.sHanaServiceUrl}(${encodeURIComponent(sSapUUID)})`;
             try {
                 const response = await this._authenticatedFetch(sUrl, "GET");
-                if(!response.ok) return false;
+                if (!response.ok) return false;
                 const data = await response.json();
-                const oEntry = data.d || data; 
+                const oEntry = data.d || data;
                 return oEntry.Status === sExpectedStatus;
             } catch (error) {
                 return false;
             }
         },
 
+        /* --- Optimized Data Loading (Parallel) --- */
         loadOrdersAndTimeEntries: async function () {
             this._setBusy(true);
             try {
                 const sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
                 const sUrl = `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=${encodeURIComponent(sFilter)}&$expand=to_MaintenanceOrderOperation&$format=json`;
 
-                const response = await this._authenticatedFetch(sUrl);
-                const data = await response.json();
-                let aOrdersRaw = data.d ? data.d.results : [];
+                // Fire requests in parallel to reduce wait time
+                const pOrders = this._authenticatedFetch(sUrl).then(r => r.json());
+                const pTimeEntries = this.fetchActiveTimeEntries();
 
+                const [dataOrders, aTimeEntries] = await Promise.all([pOrders, pTimeEntries]);
+
+                let aOrdersRaw = dataOrders.d ? dataOrders.d.results : [];
+
+                // Filter logic
                 aOrdersRaw = aOrdersRaw.filter(oOrder => {
                     const bOrderMatches = oOrder.SystemStatusText && oOrder.SystemStatusText.startsWith("REL");
                     if (bOrderMatches) {
@@ -146,9 +157,7 @@ sap.ui.define([
                 const aFlatOrders = this._processOrders(aOrdersRaw);
                 this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
 
-                const aTimeEntries = await this.fetchActiveTimeEntries();
                 this.mergeTimeEntriesWithOrders(aTimeEntries);
-
                 this.startGlobalTimerInterval();
                 this.updatePanelVisibility();
             } catch (err) {
@@ -170,8 +179,8 @@ sap.ui.define([
                         operationDesc: op.OperationDescription,
                         workCenter: op.WorkCenter || order.MainWorkCenter,
                         systemStatus: op.SystemStatusText || order.SystemStatusText,
-                        reqStartDate: this._formatDate(op.OpErlstSchedldExecStrtDteTme),
-                        reqEndDate: this._formatDate(op.OpErlstSchedldExecEndDteTme),
+                        reqStartDate: this.parseprocessdate(op.OpErlstSchedldExecStrtDteTme),
+                        reqEndDate: this.parseprocessdate(op.OpErlstSchedldExecEndDteTme),
                         assignedTo: op.OperationPersonResponsible || order.MaintOrdPersonResponsible,
                         activityType: op.ActivityType || order.MaintenanceActivityType,
                         timerState: {
@@ -186,7 +195,11 @@ sap.ui.define([
             });
             return aFlatOrders;
         },
-
+        parseprocessdate: function (sDate) {
+            if (!sDate) return null;
+            var sTimestamp = sDate.replace(/\/Date\((.*?)\)\//, "$1");
+            return new Date(parseInt(sTimestamp));
+        },
         fetchActiveTimeEntries: async function () {
             const sUserId = this.getCurrentUserId();
             const sFilter = `UserID eq '${sUserId}'`;
@@ -268,6 +281,8 @@ sap.ui.define([
             }, 1000);
         },
 
+        /* --- Clock In / Out Logic --- */
+
         onClockIn: async function (oEvent) {
             this._setBusy(true);
             const oContext = oEvent.getSource().getBindingContext("orders");
@@ -275,9 +290,33 @@ sap.ui.define([
             const sOperationId = oContext.getProperty("operationId");
             const sActivityType = oContext.getProperty("activityType");
 
+            try {
+                // Check if we already have an InProcess entry (Concurrency Check)
+                const aActiveEntries = await this.fetchActiveTimeEntries();
+                const bAlreadyExists = aActiveEntries.some(e =>
+                    e.OrderID === sOrderId &&
+                    e.OperationSo === sOperationId &&
+                    e.Status === 'InProcess'
+                );
+
+                if (bAlreadyExists) {
+                    MessageBox.error("You are already clocked into this operation. Refreshing data.", {
+                        onClose: () => {
+                            this.loadOrdersAndTimeEntries();
+                        }
+                    });
+                    this._setBusy(false);
+                    return;
+                }
+            } catch (e) {
+                MessageBox.error("Network error checking status. Please try again.");
+                this._setBusy(false);
+                return;
+            }
+
             const nowLocal = new Date();
             const sDateTimeOffset = nowLocal.toISOString();
-            
+
             const cstIso = this._toCSTIsoString(nowLocal);
             const datePartCST = cstIso.slice(0, 10);
             const timePartCST = cstIso.slice(11, 19);
@@ -286,12 +325,12 @@ sap.ui.define([
                 "OrderID": sOrderId,
                 "OperationSo": sOperationId,
                 "UserID": this.getCurrentUserId(),
-                "ActTyp": sActivityType, 
+                "ActTyp": sActivityType,
                 "ExecStartDate": datePartCST,
                 "ExecStartTime": timePartCST,
                 "ExecFinDate": datePartCST,
                 "ExecFinTime": timePartCST,
-                "ClkInLog": sDateTimeOffset,
+                "ClkInLog": cstIso + "Z",
                 "Status": "InProcess"
             };
 
@@ -371,7 +410,8 @@ sap.ui.define([
                     confirmationText: "",
                     isFinalConfirmation: false,
                     contextPath: oContext.getPath(),
-                    timeEntryId: sTimeEntryUUID
+                    timeEntryId: sTimeEntryUUID,
+                    ClockOutTime: nowLocal
                 });
 
                 this.openSubmitDialog();
@@ -382,6 +422,7 @@ sap.ui.define([
             }
         },
 
+        /* --- Dialog Handling --- */
         openSubmitDialog: function () {
             if (!this.oSubmitDialog) {
                 Fragment.load({
@@ -405,7 +446,10 @@ sap.ui.define([
             this.saveEntryToDrafts();
         },
 
-        onSubmitConfirmation: function () {
+        /* --- SUBMISSION LOGIC --- */
+
+        // 1. Triggered by "Submit" button in Dialog
+        onSubmitConfirmation: async function () {
             const oDialogModel = this.getView().getModel("dialog");
             const oData = oDialogModel.getData();
 
@@ -415,37 +459,64 @@ sap.ui.define([
             }
 
             this._setBusy(true);
-            this.postConfirmationToBAPI(oData);
+
+            // T = Final True, F = Final False
+            const sFinalIndicator = oData.isFinalConfirmation ? "T" : "F";
+            const sClockOutEditable = this._toCSTIsoString(oData.workFinishDate);
+            const sClockLog = this._toCSTIsoString(oData.ClockOutTime);
+            const sDateCST = sClockOutEditable.slice(0, 10);
+            const sTimeCST = sClockOutEditable.slice(11, 19);
+            const sActualWorkStr = parseFloat(oData.actualWork);
+
+            const oUpdatePayload = {
+                ActWrk: sActualWorkStr,
+                ExecFinDate: sDateCST,
+                ExecFinTime: sTimeCST,
+                OvrHd: sFinalIndicator,
+                Arbeh: "HR"
+            };
+
+            // Only update ClkOutLog if we are completing a running timer (context exists)
+            if (oData.contextPath) {
+                oUpdatePayload.ClkOutLog = sClockLog + "Z";
+            }
+
+            try {
+                // STEP 1: Update DB. Capture ETag to skip re-reading later.
+                const sNextETag = await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, oUpdatePayload);
+
+                // STEP 2: Proceed to BAPI, passing the known ETag
+                this.postConfirmationToBAPI(oData, sNextETag);
+
+            } catch (e) {
+                this._setBusy(false);
+                MessageBox.error("Failed to save draft state: " + e.message);
+            }
         },
 
-        postConfirmationToBAPI: async function (oData) {
-            this._setBusy(true);
+        // 2. Main Processing Chain
+        postConfirmationToBAPI: async function (oData, sKnownETag) {
+            // Note: Busy is already true from onSubmitConfirmation
+
             if (this.oSubmitDialog) {
                 this.oSubmitDialog.close();
             }
 
-            const sEmployeeUrl = "/sap/bc/zfmcall/HR_GETEMPLOYEEDATA_FROMUSER";
             const sODataUrl = "/sap/opu/odata/sap/API_MAINTORDERCONFIRMATION/MaintOrderConfirmation";
 
             try {
-                const employeeResponse = await fetch(sEmployeeUrl, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ username: this.getCurrentUserId() })
-                });
+                // OPTIMIZATION: Use cached Personnel Number if available
+                let sPersonnelNumber = this._sPersonnelNumber;
 
-                if (!employeeResponse.ok) throw new Error("Employee number not found");
-                const employeeData = await employeeResponse.json();
-                if (!employeeData || !employeeData.employeenumber || parseInt(employeeData.employeenumber, 10) === 0) {
-                    throw new Error("Employee number not found");
+                if (!sPersonnelNumber) {
+                    sPersonnelNumber = await this._fetchPersonnelNumber();
                 }
-                const sPersonnelNumber = employeeData.employeenumber;
 
-                await this._refreshCsrfToken();
-                if (!this._sCsrfToken) throw new Error("Could not fetch CSRF Token");
+                // CSRF Token is likely valid from previous calls, relying on _authenticatedFetch retry if needed
 
+                // --- A. PRIMARY CONFIRMATION ---
                 const oPrimaryPayload = this._buildConfirmationPayload(oData, sPersonnelNumber, false);
-                 
+
                 const responsePrimary = await fetch(sODataUrl, {
                     method: "POST",
                     headers: {
@@ -457,33 +528,39 @@ sap.ui.define([
                     credentials: "include"
                 });
 
-                const responseDataPrimary = await responsePrimary.json();
                 if (!responsePrimary.ok) {
+                    const responseDataPrimary = await responsePrimary.json();
                     throw new Error(this._extractErrorMessage(responseDataPrimary));
                 }
 
+                const responseDataPrimary = await responsePrimary.json();
                 const resultPrimary = responseDataPrimary.d || responseDataPrimary;
                 const sCnfNo = resultPrimary.MaintOrderConf;
                 const sCnfCntr = resultPrimary.MaintOrderConfCntrValue;
 
+                // Stop UI Timer immediately for better UX
                 if (oData.contextPath) {
                     const oOrdersModel = this.getOwnerComponent().getModel("orders");
                     const oContext = oOrdersModel.createBindingContext(oData.contextPath);
                     this.stopSpecificTimer(oContext);
                 }
 
-                await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
+                // --- B. UPDATE DB (Primary Done) ---
+                // Pass sKnownETag to skip GET. Capture new ETag for next step.
+                const sNextETag2 = await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
                     CnfNo: sCnfNo,
                     CnfCntr: sCnfCntr,
                     Status: "PrimaryDone",
+                    workStartDate: oData.workStartDate,
                     workFinishDate: oData.workFinishDate,
-                    ActWrk: parseFloat(oData.actualWork), 
-                    Arbeh: "H" 
-                });
+                    ActWrk: parseFloat(oData.actualWork),
+                    Arbeh: "HR"
+                }, sKnownETag);
 
+                // --- C. OVERHEAD CONFIRMATION ---
                 try {
-                    const oOverheadPayload = this._buildConfirmationPayload(oData, sPersonnelNumber, true); 
-                    
+                    const oOverheadPayload = this._buildConfirmationPayload(oData, sPersonnelNumber, true);
+
                     const responseOverhead = await fetch(sODataUrl, {
                         method: "POST",
                         headers: {
@@ -495,30 +572,36 @@ sap.ui.define([
                         credentials: "include"
                     });
 
-                    const responseDataOverhead = await responseOverhead.json();
                     if (!responseOverhead.ok) {
-                          throw new Error(this._extractErrorMessage(responseDataOverhead));
+                        const responseDataOverhead = await responseOverhead.json();
+                        throw new Error(this._extractErrorMessage(responseDataOverhead));
                     }
 
+                    const responseDataOverhead = await responseOverhead.json();
                     const resultOverhead = responseDataOverhead.d || responseDataOverhead;
-                    
+
+                    // --- D. UPDATE DB (Completed) ---
+                    // Pass sNextETag2 to skip GET
                     await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
                         OcnfNo: resultOverhead.MaintOrderConf,
                         OcnfCntr: resultOverhead.MaintOrderConfCntrValue,
                         OvrHd: "X",
                         Status: "Completed"
-                    });
+                    }, sNextETag2);
 
                     sap.m.MessageBox.success(`Time & Overhead Saved Successfully!\nConf: ${sCnfNo}, Overhead: ${resultOverhead.MaintOrderConf}`, {
                         onClose: () => this.onCloseDialog()
                     });
 
                 } catch (overheadError) {
+                    // Overhead Failed: Update DB as OverheadError
+                    // Pass sNextETag2 to skip GET
                     await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
                         Status: "OverheadError"
-                    });
+                    }, sNextETag2);
+
                     sap.m.MessageBox.warning(`Primary Confirmation Saved (${sCnfNo}), but Overhead failed: ${overheadError.message}. Please retry from Overhead Failures panel.`, {
-                          onClose: () => this.onCloseDialog()
+                        onClose: () => this.onCloseDialog()
                     });
                 }
 
@@ -530,43 +613,47 @@ sap.ui.define([
             }
         },
 
-        onPostOverheadFailure: async function(oEvent) {
-             const oDraft = oEvent.getSource().getBindingContext("overheadFailures").getObject();
-             
-             const bValid = await this._verifyEntryStatus(oDraft.SapUUID, "OverheadError");
-             if (!bValid) {
-                 MessageBox.error("This entry was modified in another session. Refreshing data.", {
-                     onClose: () => {
-                         this.loadOrdersAndTimeEntries();
-                         this.saveEntryToDrafts();
-                     }
-                 });
-                 return;
-             }
+        // Helper to fetch and cache personnel number
+        _fetchPersonnelNumber: async function () {
+            if (this._sPersonnelNumber) return this._sPersonnelNumber;
 
-             this._setBusy(true);
-             const sEmployeeUrl = "/sap/bc/zfmcall/HR_GETEMPLOYEEDATA_FROMUSER";
+            const sEmployeeUrl = "/sap/bc/zfmcall/HR_GETEMPLOYEEDATA_FROMUSER";
+            const response = await fetch(sEmployeeUrl, {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ username: this.getCurrentUserId() })
+            });
 
-             try {
-                const employeeResponse = await fetch(sEmployeeUrl, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ username: this.getCurrentUserId() })
-                });
+            if (!response.ok) throw new Error("Employee number not found");
+            const data = await response.json();
+            if (!data || !data.employeenumber || parseInt(data.employeenumber, 10) === 0) {
+                throw new Error("Employee number not found");
+            }
+            this._sPersonnelNumber = data.employeenumber;
+            return this._sPersonnelNumber;
+        },
 
-                if (!employeeResponse.ok) throw new Error("Employee number not found");
-                const employeeData = await employeeResponse.json();
-                const sPersonnelNumber = employeeData.employeenumber;
+        /* --- RETRY OVERHEAD --- */
+        onPostOverheadFailure: async function (oEvent) {
+            const oDraft = oEvent.getSource().getBindingContext("overheadFailures").getObject();
+            this._setBusy(true);
 
-                await this._refreshCsrfToken();
+            try {
+                let sPersonnelNumber = this._sPersonnelNumber;
+                if (!sPersonnelNumber) {
+                    sPersonnelNumber = await this._fetchPersonnelNumber();
+                }
+
+                await this._refreshCsrfToken(); // Ensure token is fresh for manual retry
                 if (!this._sCsrfToken) throw new Error("Could not fetch CSRF Token");
 
                 const dStart = this._parseServerCSTToLocalDate(oDraft.ExecStartDate, oDraft.ExecStartTime);
                 const dEnd = this._parseServerCSTToLocalDate(oDraft.ExecFinDate, oDraft.ExecFinTime);
                 const iDiffMs = dEnd.getTime() - dStart.getTime();
                 const iTotalSeconds = Math.round(iDiffMs / 1000);
-                
+
                 const fActualWork = parseFloat(oDraft.ActWrk);
+                const bIsFinal = (oDraft.OvrHd === "T");
 
                 const oData = {
                     OrderID: oDraft.OrderID,
@@ -575,7 +662,7 @@ sap.ui.define([
                     workFinishDate: dEnd,
                     actualWork: fActualWork,
                     elapsedSeconds: iTotalSeconds,
-                    isFinalConfirmation: false,
+                    isFinalConfirmation: bIsFinal,
                     confirmationText: ""
                 };
 
@@ -593,13 +680,14 @@ sap.ui.define([
                     credentials: "include"
                 });
 
-                const responseDataOverhead = await responseOverhead.json();
                 if (!responseOverhead.ok) {
-                      throw new Error(this._extractErrorMessage(responseDataOverhead));
+                    const responseDataOverhead = await responseOverhead.json();
+                    throw new Error(this._extractErrorMessage(responseDataOverhead));
                 }
 
+                const responseDataOverhead = await responseOverhead.json();
                 const resultOverhead = responseDataOverhead.d || responseDataOverhead;
-                
+
                 await this.updateTimeEntryOnServerByUUID(oDraft.SapUUID, {
                     OcnfNo: resultOverhead.MaintOrderConf,
                     OcnfCntr: resultOverhead.MaintOrderConfCntrValue,
@@ -610,77 +698,74 @@ sap.ui.define([
                 MessageToast.show(`Overhead Confirmed: ${resultOverhead.MaintOrderConf}`);
                 this.saveEntryToDrafts();
 
-             } catch (e) {
-                 MessageBox.error("Overhead Retry Failed: " + e.message);
-             } finally {
-                 this._setBusy(false);
-             }
+            } catch (e) {
+                MessageBox.error("Overhead Retry Failed: " + e.message);
+            } finally {
+                this._setBusy(false);
+            }
         },
 
-        _buildConfirmationPayload: function(oData, sPersonnelNumber, bIsOverhead) {
-            const sOrderId = String(oData.OrderID).padStart(12, "0");
-            const sOperation = String(oData.OperationSo).padStart(4, "0");
-            const startCSTIso = this._toCSTIsoString(oData.workStartDate);
-            const finishCSTIso = this._toCSTIsoString(oData.workFinishDate);
+        /* --- Update Custom HANA Table (With ETag Optimization) --- */
+        updateTimeEntryOnServerByUUID: async function (sSapUUID, oAttributes, sKnownETag) {
+            // NOTE: We do not call _setBusy here as it is handled by the caller to prevent flicker
+            const sEntryUrl = `${this.sHanaServiceUrl}(${encodeURIComponent(sSapUUID)})`;
 
-            const toODataDate = (iso) => {
-                const y = parseInt(iso.substring(0, 4), 10);
-                const m = parseInt(iso.substring(5, 7), 10) - 1;
-                const d = parseInt(iso.substring(8, 10), 10);
-                const h = parseInt(iso.substring(11, 13), 10);
-                const min = parseInt(iso.substring(14, 16), 10);
-                const s = parseInt(iso.substring(17, 19), 10);
-                return `/Date(${Date.UTC(y, m, d, h, min, s)})/`;
-            };
-
-            const toODataTime = (iso) => {
-                const timePart = iso.slice(11, 19);
-                const [h, m, s] = timePart.split(':');
-                return `PT${h}H${m}M${s}S`;
-            };
-
-            let sActualWork = parseFloat(oData.actualWork || 0).toFixed(1);
-            if (parseFloat(sActualWork) === 0.0 && oData.elapsedSeconds > 60) {
-                sActualWork = "0.1";
-            }
-
-            const oPayload = {
-                "MaintenanceOrder": sOrderId,
-                "MaintenanceOrderOperation": sOperation,
-                "PersonnelNumber": sPersonnelNumber,
-                "ActualWorkQuantity": sActualWork,
-                "ActualWorkQuantityUnit": "H",
-                "IsFinalConfirmation": oData.isFinalConfirmation || false,
-                "ConfirmationText": oData.confirmationText || "",
-                "PostingDate": toODataDate(this._toCSTIsoString(new Date())),
-                "OperationConfirmedStartDate": toODataDate(startCSTIso),
-                "OperationConfirmedStartTime": toODataTime(startCSTIso),
-                "OperationConfirmedEndDate": toODataDate(finishCSTIso),
-                "OperationConfirmedEndTime": toODataTime(finishCSTIso),
-                "ActivityType":oData.ActivityType
-            };
-
-            if (bIsOverhead) {
-                oPayload.ActivityType = "OVRHD"; 
-                oPayload.ConfirmationText = "Overhead: " + (oData.confirmationText || "");
-            }
-
-            return oPayload;
-        },
-
-        _extractErrorMessage: function(responseData) {
-            let sErrorMessage = "Unknown Error";
             try {
-                if (responseData.error && responseData.error.message) {
-                    sErrorMessage = responseData.error.message.value;
+                if (!this._sCsrfToken) await this._refreshCsrfToken();
+
+                const oPayload = { ...oAttributes };
+
+                // Date formatting logic
+                if (oAttributes.workStartDate) {
+                    const cst = this._toCSTIsoString(oAttributes.workStartDate);
+                    oPayload.ExecStartDate = cst.slice(0, 10);
+                    oPayload.ExecStartTime = cst.slice(11, 19);
+                    delete oPayload.workStartDate;
                 }
-                if (responseData.error?.innererror?.errordetails?.length > 0) {
-                    const firstErr = responseData.error.innererror.errordetails.find(d => d.severity === "error");
-                    if (firstErr) sErrorMessage = firstErr.message;
+                if (oAttributes.workFinishDate) {
+                    const cst = this._toCSTIsoString(oAttributes.workFinishDate);
+                    oPayload.ExecFinDate = cst.slice(0, 10);
+                    oPayload.ExecFinTime = cst.slice(11, 19);
+                    // oPayload.ClkOutLog = oAttributes.workFinishDate.toISOString(); // Moved to caller for specific cases
+                    delete oPayload.workFinishDate;
                 }
-            } catch (e) { }
-            return sErrorMessage;
+
+                let eTag = sKnownETag;
+
+                // If we don't have a known ETag, we MUST fetch it (Cost: 1 Network Call)
+                if (!eTag) {
+                    const resHead = await this._authenticatedFetch(sEntryUrl, "GET");
+                    const oData = await resHead.json();
+                    eTag = resHead.headers.get("ETag") || (oData.d?.__metadata?.etag) || (oData['@odata.etag']);
+                }
+
+                // OPTIMIZATION: Return the response so we can grab the NEW ETag
+                const response = await fetch(sEntryUrl, {
+                    method: "PATCH",
+                    headers: {
+                        "Content-Type": "application/json",
+                        "X-CSRF-Token": this._sCsrfToken,
+                        "If-Match": eTag || "*"
+                    },
+                    body: JSON.stringify(oPayload),
+                    credentials: 'include'
+                });
+
+                if (!response.ok) {
+                    const txt = await response.text();
+                    throw new Error(`DB Update Failed: ${txt}`);
+                }
+
+                // Return new ETag for chaining
+                return response.headers.get("ETag") || "*";
+
+            } catch (e) {
+                console.error("Error updating time entry on server:", e);
+                throw e;
+            }
         },
+
+        /* --- Common Helpers (No changes to logic) --- */
 
         _authenticatedFetch: async function (url, method = "GET", body = null, isRetry = false) {
             const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
@@ -716,54 +801,6 @@ sap.ui.define([
                 const token = response.headers.get("X-CSRF-Token");
                 if (token) this._sCsrfToken = token;
             } catch (e) { console.error("CSRF Fetch Error", e); }
-        },
-
-        updateTimeEntryOnServerByUUID: async function (sSapUUID, oAttributes) {
-            this._setBusy(true);
-            const sEntryUrl = `${this.sHanaServiceUrl}(${encodeURIComponent(sSapUUID)})`;
-
-            try {
-                if (!this._sCsrfToken) await this._refreshCsrfToken();
-
-                const oPayload = { ...oAttributes }; 
-                
-                if (oAttributes.workStartDate) {
-                    const cst = this._toCSTIsoString(oAttributes.workStartDate);
-                    oPayload.ExecStartDate = cst.slice(0, 10);
-                    oPayload.ExecStartTime = cst.slice(11, 19);
-                    delete oPayload.workStartDate;
-                }
-                if (oAttributes.workFinishDate) {
-                    const cst = this._toCSTIsoString(oAttributes.workFinishDate);
-                    oPayload.ExecFinDate = cst.slice(0, 10);
-                    oPayload.ExecFinTime = cst.slice(11, 19);
-                    
-                    oPayload.ClkOutLog = oAttributes.workFinishDate.toISOString();
-
-                    delete oPayload.workFinishDate;
-                }
-
-                const resHead = await this._authenticatedFetch(sEntryUrl, "GET");
-                const oData = await resHead.json();
-                const eTag = resHead.headers.get("ETag") || (oData.d?.__metadata?.etag) || (oData['@odata.etag']);
-
-                await fetch(sEntryUrl, {
-                    method: "PATCH",
-                    headers: {
-                        "Content-Type": "application/json",
-                        "X-CSRF-Token": this._sCsrfToken,
-                        "If-Match": eTag || "*"
-                    },
-                    body: JSON.stringify(oPayload),
-                    credentials: 'include'
-                });
-
-            } catch (e) {
-                console.error("Error updating time entry on server:", e);
-                throw e;
-            } finally {
-                this._setBusy(false);
-            }
         },
 
         stopSpecificTimer: function (oContext) {
@@ -909,7 +946,7 @@ sap.ui.define([
                 const response = await this._authenticatedFetch(sUrl);
                 const data = await response.json();
                 const aAllResults = data.value || (data.d ? data.d.results : []);
-                
+
                 const processEntry = (item) => {
                     const dStart = this._parseServerCSTToLocalDate(item.ExecStartDate, item.ExecStartTime);
                     const dEnd = this._parseServerCSTToLocalDate(item.ExecFinDate, item.ExecFinTime);
@@ -939,16 +976,16 @@ sap.ui.define([
 
         onPostDraft: async function (oEvent) {
             const oDraft = oEvent.getSource().getBindingContext("drafts").getObject();
-            
+
             const bValid = await this._verifyEntryStatus(oDraft.SapUUID, "Error");
             if (!bValid) {
-                 MessageBox.error("This entry was modified in another session. Refreshing data.", {
-                     onClose: () => {
-                         this.loadOrdersAndTimeEntries();
-                         this.saveEntryToDrafts();
-                     }
-                 });
-                 return;
+                MessageBox.error("This entry was modified in another session. Refreshing data.", {
+                    onClose: () => {
+                        this.loadOrdersAndTimeEntries();
+                        this.saveEntryToDrafts();
+                    }
+                });
+                return;
             }
 
             const dStart = this._parseServerCSTToLocalDate(oDraft.ExecStartDate, oDraft.ExecStartTime);
@@ -965,7 +1002,7 @@ sap.ui.define([
                 actualWork: oDraft.actualWorkHours,
                 elapsedSeconds: iTotalSeconds,
                 confirmationText: "",
-                isFinalConfirmation: false,
+                isFinalConfirmation: (oDraft.OvrHd === "T"),
                 timeEntryId: oDraft.SapUUID,
                 contextPath: null
             };
@@ -981,15 +1018,15 @@ sap.ui.define([
 
             const sExpectedStatus = sModelName === "overheadFailures" ? "OverheadError" : "Error";
             const bValid = await this._verifyEntryStatus(oDraft.SapUUID, sExpectedStatus);
-            
+
             if (!bValid) {
-                 MessageBox.error("This entry was modified in another session. Refreshing data.", {
-                     onClose: () => {
-                         this.loadOrdersAndTimeEntries();
-                         this.saveEntryToDrafts();
-                     }
-                 });
-                 return;
+                MessageBox.error("This entry was modified in another session. Refreshing data.", {
+                    onClose: () => {
+                        this.loadOrdersAndTimeEntries();
+                        this.saveEntryToDrafts();
+                    }
+                });
+                return;
             }
 
             MessageBox.confirm("Permanently delete draft?", {
@@ -1003,6 +1040,71 @@ sap.ui.define([
                     }
                 }
             });
+        },
+
+        _buildConfirmationPayload: function (oData, sPersonnelNumber, bIsOverhead) {
+            const sOrderId = String(oData.OrderID).padStart(12, "0");
+            const sOperation = String(oData.OperationSo).padStart(4, "0");
+            const startCSTIso = this._toCSTIsoString(oData.workStartDate);
+            const finishCSTIso = this._toCSTIsoString(oData.workFinishDate);
+
+            const toODataDate = (iso) => {
+                const y = parseInt(iso.substring(0, 4), 10);
+                const m = parseInt(iso.substring(5, 7), 10) - 1;
+                const d = parseInt(iso.substring(8, 10), 10);
+                const h = parseInt(iso.substring(11, 13), 10);
+                const min = parseInt(iso.substring(14, 16), 10);
+                const s = parseInt(iso.substring(17, 19), 10);
+                return `/Date(${Date.UTC(y, m, d, h, min, s)})/`;
+            };
+
+            const toODataTime = (iso) => {
+                const timePart = iso.slice(11, 19);
+                const [h, m, s] = timePart.split(':');
+                return `PT${h}H${m}M${s}S`;
+            };
+
+            let sActualWork = parseFloat(oData.actualWork || 0).toFixed(1);
+            if (parseFloat(sActualWork) === 0.0 && oData.elapsedSeconds > 60) {
+                sActualWork = "0.1";
+            }
+
+            const oPayload = {
+                "MaintenanceOrder": sOrderId,
+                "MaintenanceOrderOperation": sOperation,
+                "PersonnelNumber": sPersonnelNumber,
+                "ActualWorkQuantity": sActualWork,
+                "ActualWorkQuantityUnit": "HR",
+                "IsFinalConfirmation": oData.isFinalConfirmation || false,
+                "ConfirmationText": oData.confirmationText || "",
+                "PostingDate": toODataDate(this._toCSTIsoString(new Date())),
+                "OperationConfirmedStartDate": toODataDate(startCSTIso),
+                "OperationConfirmedStartTime": toODataTime(startCSTIso),
+                "OperationConfirmedEndDate": toODataDate(finishCSTIso),
+                "OperationConfirmedEndTime": toODataTime(finishCSTIso),
+                "ActivityType": oData.ActivityType
+            };
+
+            if (bIsOverhead) {
+                oPayload.ActivityType = "OVRHD";
+                oPayload.ConfirmationText = (oData.confirmationText || "");
+            }
+
+            return oPayload;
+        },
+
+        _extractErrorMessage: function (responseData) {
+            let sErrorMessage = "Unknown Error";
+            try {
+                if (responseData.error && responseData.error.message) {
+                    sErrorMessage = responseData.error.message.value;
+                }
+                if (responseData.error?.innererror?.errordetails?.length > 0) {
+                    const firstErr = responseData.error.innererror.errordetails.find(d => d.severity === "error");
+                    if (firstErr) sErrorMessage = firstErr.message;
+                }
+            } catch (e) { }
+            return sErrorMessage;
         }
     });
 });
