@@ -1,16 +1,14 @@
-/* --- General Page Layout --- */
 .sapUiContentPadding {
-    background-color: #f4f5f7; /* Light grey background for the whole page */
+    background-color: #f4f5f7;
     padding: 1rem;
 }
 
-/* --- Card System --- */
 .customCard {
     background-color: #ffffff;
     border-radius: 0.75rem;
     box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
     margin-bottom: 1rem;
-    padding: 1.25rem; /* More padding */
+    padding: 1.25rem; 
     transition: box-shadow 0.2s ease-in-out;
 }
 
@@ -19,10 +17,10 @@
 }
 
 .runningCard {
-    border: 1px solid #0a6ed1; /* Blue border for active items */
+    border: 1px solid #0a6ed1;
 }
 
-/* --- Typography --- */
+
 .cardSubtitle {
     color: #6b7280;
     font-size: 0.875rem;
@@ -35,9 +33,9 @@
     font-weight: 500;
 }
 
-/* --- Timer Section --- */
+
 .timer-container {
-    background-color: #f0f6ff; /* Light blue background for running timer */
+    background-color: #f0f6ff; 
     border-radius: 0.5rem;
     width: 100%;
     padding: 1.5rem 0;
@@ -61,10 +59,10 @@
 
 .runningClock {
     font-size: 3rem;
-    color: #0a6ed1; /* Blue clock text */
+    color: #0a6ed1; 
 }
 
-/* --- Saved/Draft Entry --- */
+
 .savedEntryCard {
     padding: 1rem;
     background-color: #ffffff;

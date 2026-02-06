@@ -12,47 +12,32 @@ sap.ui.define([
         _oSubmitDialog: null,
         _sCsrfToken: null,
         _filterDebounceTimer: null,
-        _sPersonnelNumber: null, // Cache for Employee Number
+        _sPersonnelNumber: null,
         sHanaServiceUrl: "/sap/opu/odata4/sap/zapi_cs_cio_tt_o4/srvd_a2x/sap/zapi_cs_cio_tt_o4/0001/ZC_CS_CIO_TT",
 
         onInit: function () {
             this._initializeUserId().then(() => {
                 this._initModels();
-                // Load data
                 this.loadOrdersAndTimeEntries();
-                // Pre-fetch personnel number in background to speed up Submit later
                 this._fetchPersonnelNumber().catch(() => { });
             });
         },
 
         _initModels: function () {
             this.getView().setModel(new JSONModel({ busy: false }), "busy");
-
+            this.getView().setModel(new JSONModel({ activeOrderId: null, activeOperationId: null }), "activeTimer");
             this.getView().setModel(new JSONModel({
-                activeOrderId: null,
-                activeOperationId: null
-            }), "activeTimer");
-
-            this.getView().setModel(new JSONModel({
-                orderId: null,
-                operationId: null,
-                workStartDate: null,
-                workFinishDate: null,
-                actualWork: 0.0,
-                confirmationText: "",
-                isFinalConfirmation: false,
-                contextPath: null,
-                timeEntryId: null,
-                ActivityType: null
+                orderId: null, operationId: null, workStartDate: null, workFinishDate: null,
+                actualWork: 0.0, confirmationText: "", isFinalConfirmation: false,
+                contextPath: null, timeEntryId: null, ActivityType: null
             }), "dialog");
 
             const oComponent = this.getOwnerComponent();
-            oComponent.setModel(new JSONModel({ isProgressPanelVisible: false }), "viewState");
+            oComponent.setModel(new JSONModel({ isProgressPanelVisible: false, activeKeys: [] }), "viewState");
             oComponent.setModel(new JSONModel({ entries: [] }), "drafts");
             oComponent.setModel(new JSONModel({ entries: [] }), "overheadFailures");
             oComponent.setModel(new JSONModel({ orders: [] }), "orders");
 
-            this.saveEntryToDrafts();
         },
 
         _setBusy: function (bBusy) {
@@ -76,7 +61,7 @@ sap.ui.define([
             });
         },
 
-        /* --- Date Handling Helpers (CST <-> Local) --- */
+
         _toCSTIsoString: function (oDate) {
             const d = oDate || new Date();
             const options = {
@@ -124,49 +109,152 @@ sap.ui.define([
                 return false;
             }
         },
+        _updateActiveVisibilityKeys: function () {
+            const oComp = this.getOwnerComponent();
+            const aOrders = oComp.getModel("orders").getProperty("/orders") || [];
+            const aDrafts = oComp.getModel("drafts").getProperty("/entries") || [];
+            const aOverhead = oComp.getModel("overheadFailures").getProperty("/entries") || [];
 
-        /* --- Optimized Data Loading (Parallel) --- */
+
+            const aRunning = aOrders.filter(o => o.timerState.isRunning).map(o => `${o.orderId}-${o.operationId}`);
+            const aDraftIds = aDrafts.map(d => `${d.OrderID}-${d.OperationSo}`);
+            const aOverheadIds = aOverhead.map(o => `${o.OrderID}-${o.OperationSo}`);
+            const aFinalKeys = [...new Set([...aRunning, ...aDraftIds, ...aOverheadIds])];
+            oComp.getModel("viewState").setProperty("/activeKeys", aFinalKeys);
+        },
+
         loadOrdersAndTimeEntries: async function () {
             this._setBusy(true);
             try {
-                const sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
-                const sUrl = `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=${encodeURIComponent(sFilter)}&$expand=to_MaintenanceOrderOperation&$format=json`;
 
-                // Fire requests in parallel to reduce wait time
-                const pOrders = this._authenticatedFetch(sUrl).then(r => r.json());
-                const pTimeEntries = this.fetchActiveTimeEntries();
+                const aAllEntries = await this._fetchAllUserTimeEntries();
+                const aActiveEntries = aAllEntries.filter(e => e.Status === "InProcess");
+                const aErrorEntries = aAllEntries.filter(e => e.Status === "Error");
+                const aOverheadEntries = aAllEntries.filter(e => e.Status === "OverheadError");
+                this.getOwnerComponent().getModel("drafts").setProperty("/entries", aErrorEntries);
+                this.getOwnerComponent().getModel("overheadFailures").setProperty("/entries", aOverheadEntries);
+                const aActiveOrders = await this._buildActiveOrdersFromHana(aActiveEntries);
+                const aOpenOrders = await this._fetchOpenOrdersFromAPI();
+                const aFinalOrders = [...aActiveOrders, ...aOpenOrders];
 
-                const [dataOrders, aTimeEntries] = await Promise.all([pOrders, pTimeEntries]);
+                this.getOwnerComponent().getModel("orders").setProperty("/orders", aFinalOrders);
 
-                let aOrdersRaw = dataOrders.d ? dataOrders.d.results : [];
-
-                // Filter logic
-                aOrdersRaw = aOrdersRaw.filter(oOrder => {
-                    const bOrderMatches = oOrder.SystemStatusText && oOrder.SystemStatusText.startsWith("REL");
-                    if (bOrderMatches) {
-                        if (oOrder.to_MaintenanceOrderOperation && oOrder.to_MaintenanceOrderOperation.results) {
-                            oOrder.to_MaintenanceOrderOperation.results = oOrder.to_MaintenanceOrderOperation.results.filter(oOp => {
-                                return !oOp.SystemStatusText || !oOp.SystemStatusText.startsWith("CNF");
-                            });
-                        }
-                        return true;
-                    }
-                    return false;
-                });
-
-                const aFlatOrders = this._processOrders(aOrdersRaw);
-                this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
-
-                this.mergeTimeEntriesWithOrders(aTimeEntries);
+                this._updateActiveVisibilityKeys();
                 this.startGlobalTimerInterval();
                 this.updatePanelVisibility();
+
             } catch (err) {
                 MessageBox.error(err.message);
             } finally {
                 this._setBusy(false);
             }
         },
+        _fetchAllUserTimeEntries: async function () {
 
+            const sUserId = this.getCurrentUserId();
+            let sUrl = `${this.sHanaServiceUrl}?$filter=UserID eq '${sUserId}'`;
+
+            let aAllResults = [];
+
+            while (sUrl) {
+                const response = await this._authenticatedFetch(sUrl);
+                const data = await response.json();
+
+                const aPage = data.value || [];
+                aAllResults = aAllResults.concat(aPage);
+                if (data["@odata.nextLink"]) {
+                    if (data["@odata.nextLink"].startsWith("http")) {
+                        sUrl = data["@odata.nextLink"];
+                    } else {
+                        sUrl = this.sHanaServiceUrl + data["@odata.nextLink"].split("ZC_CS_CIO_TT")[1];
+                    }
+                } else {
+                    sUrl = null;
+                }
+            }
+
+            return aAllResults;
+        },
+        _buildActiveOrdersFromHana: async function (aActiveEntries) {
+
+            const aPromises = aActiveEntries.map(async entry => {
+
+                const dStartLocal = this._parseServerCSTToLocalDate(entry.ExecStartDate, entry.ExecStartTime);
+                const iElapsedSeconds = Math.round((Date.now() - dStartLocal.getTime()) / 1000);
+
+                const oOrder = {
+                    orderId: entry.OrderID,
+                    operationId: entry.OperationSo,
+                    orderDesc: "Loading...",
+                    operationDesc: "Loading...",
+                    workCenter: "",
+                    activityType: entry.ActTyp,
+                    timerState: {
+                        elapsedSeconds: iElapsedSeconds,
+                        baseElapsedSeconds: iElapsedSeconds,
+                        isRunning: true,
+                        clockInTime: dStartLocal.toISOString(),
+                        timeEntryId: entry.SapUUID
+                    }
+                };
+
+                const oDetails = await this._fetchSpecificOrderOp(entry.OrderID, entry.OperationSo);
+                if (oDetails) {
+                    oOrder.orderDesc = oDetails.orderDesc;
+                    oOrder.operationDesc = oDetails.operationDesc;
+                    oOrder.workCenter = oDetails.workCenter;
+                }
+
+                return oOrder;
+            });
+
+            return Promise.all(aPromises);
+        }
+        ,
+        _fetchOpenOrdersFromAPI: async function () {
+
+            const sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
+            const sUrl = `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=${encodeURIComponent(sFilter)}&$expand=to_MaintenanceOrderOperation&$format=json`;
+
+            const resOrders = await this._authenticatedFetch(sUrl);
+            let aOrdersRaw = (await resOrders.json()).d.results;
+
+            aOrdersRaw = aOrdersRaw.filter(o => o.SystemStatusText?.startsWith("REL"));
+            return this._processOrders(aOrdersRaw);
+        },
+
+
+        _fetchSpecificOrderOp: async function (sOrderId, sOpId) {
+            const sPaddedOrder = sOrderId;
+            const sPaddedOp = sOpId;
+            const sUrl =
+                `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/` +
+                `MaintenanceOrderOperation(` +
+                `MaintenanceOrder='${sPaddedOrder}',` +
+                `MaintenanceOrderOperation='${sPaddedOp}',` +
+                `MaintenanceOrderSubOperation=''` +
+                `)?$expand=to_MaintenanceOrder&$format=json`;
+            try {
+                const response = await this._authenticatedFetch(sUrl);
+                const data = await response.json();
+                const op = data.d || data;
+                const order = op.to_MaintenanceOrder || {};
+
+                return {
+                    orderId: op.MaintenanceOrder,
+                    orderDesc: order.MaintenanceOrderDesc || "Direct Detail",
+                    operationId: op.MaintenanceOrderOperation,
+                    operationDesc: op.OperationDescription,
+                    workCenter: op.WorkCenter || order.MainWorkCenter,
+                    systemStatus: op.SystemStatusText,
+                    reqStartDate: this.parseprocessdate(op.OpErlstSchedldExecStrtDteTme),
+                    reqEndDate: this.parseprocessdate(op.OpErlstSchedldExecEndDteTme),
+                    assignedTo: op.OperationPersonResponsible,
+                    activityType: op.ActivityType,
+                    timerState: { elapsedSeconds: 0, isRunning: false, clockInTime: null, timeEntryId: null }
+                };
+            } catch (e) { return null; }
+        },
         _processOrders: function (aOrdersRaw) {
             const aFlatOrders = [];
             aOrdersRaw.forEach(order => {
@@ -182,7 +270,7 @@ sap.ui.define([
                         reqStartDate: this.parseprocessdate(op.OpErlstSchedldExecStrtDteTme),
                         reqEndDate: this.parseprocessdate(op.OpErlstSchedldExecEndDteTme),
                         assignedTo: op.OperationPersonResponsible || order.MaintOrdPersonResponsible,
-                        activityType: op.ActivityType || order.MaintenanceActivityType,
+                        activityType: op.ActivityType,
                         timerState: {
                             elapsedSeconds: 0,
                             baseElapsedSeconds: 0,
@@ -199,57 +287,6 @@ sap.ui.define([
             if (!sDate) return null;
             var sTimestamp = sDate.replace(/\/Date\((.*?)\)\//, "$1");
             return new Date(parseInt(sTimestamp));
-        },
-        fetchActiveTimeEntries: async function () {
-            const sUserId = this.getCurrentUserId();
-            const sFilter = `UserID eq '${sUserId}'`;
-            const sUrl = `${this.sHanaServiceUrl}?$filter=${encodeURIComponent(sFilter)}&$format=json`;
-
-            try {
-                const response = await this._authenticatedFetch(sUrl);
-                const data = await response.json();
-                const aAllResults = data.value || (data.d ? data.d.results : []);
-                return aAllResults.filter(item => item.Status === 'InProcess');
-            } catch (e) {
-                console.error("Failed to fetch active time entries:", e);
-                return [];
-            }
-        },
-
-        mergeTimeEntriesWithOrders: function (aTimeEntries) {
-            const oOrdersModel = this.getOwnerComponent().getModel("orders");
-            const aOrders = oOrdersModel.getProperty("/orders");
-            let bHasChanges = false;
-            const dNowLocal = new Date();
-
-            aTimeEntries.forEach(oEntry => {
-                const oOrder = aOrders.find(o =>
-                    String(parseInt(o.orderId, 10)) === String(parseInt(oEntry.OrderID, 10)) &&
-                    String(parseInt(o.operationId, 10)) === String(parseInt(oEntry.OperationSo, 10))
-                );
-
-                if (oOrder) {
-                    const dStartLocal = this._parseServerCSTToLocalDate(oEntry.ExecStartDate, oEntry.ExecStartTime);
-
-                    if (dStartLocal) {
-                        const iDiffMs = dNowLocal.getTime() - dStartLocal.getTime();
-                        const iDiffSeconds = Math.round(iDiffMs / 1000);
-
-                        oOrder.timerState = {
-                            elapsedSeconds: iDiffSeconds,
-                            baseElapsedSeconds: iDiffSeconds,
-                            isRunning: true,
-                            clockInTime: dStartLocal.toISOString(),
-                            timeEntryId: oEntry.SapUUID
-                        };
-                        bHasChanges = true;
-                    }
-                }
-            });
-
-            if (bHasChanges) {
-                oOrdersModel.refresh();
-            }
         },
 
         startGlobalTimerInterval: function () {
@@ -282,6 +319,10 @@ sap.ui.define([
         },
 
         /* --- Clock In / Out Logic --- */
+        fetchActiveTimeEntries: async function () {
+            const aAll = await this._fetchAllUserTimeEntries();
+            return aAll.filter(e => e.Status === "InProcess");
+        },
 
         onClockIn: async function (oEvent) {
             this._setBusy(true);
@@ -291,13 +332,14 @@ sap.ui.define([
             const sActivityType = oContext.getProperty("activityType");
 
             try {
-                // Check if we already have an InProcess entry (Concurrency Check)
-                const aActiveEntries = await this.fetchActiveTimeEntries();
-                const bAlreadyExists = aActiveEntries.some(e =>
+
+                const aAllEntries = await this.fetchActiveTimeEntries();
+                const bAlreadyExists = aAllEntries.some(e =>
                     e.OrderID === sOrderId &&
                     e.OperationSo === sOperationId &&
-                    e.Status === 'InProcess'
+                    e.Status === "InProcess"
                 );
+
 
                 if (bAlreadyExists) {
                     MessageBox.error("You are already clocked into this operation. Refreshing data.", {
@@ -349,6 +391,7 @@ sap.ui.define([
 
                 oContext.getModel().refresh();
                 this.startGlobalTimerInterval();
+                this._updateActiveVisibilityKeys();
                 this.updatePanelVisibility();
                 MessageToast.show("Clocked in");
             } catch (error) {
@@ -395,7 +438,7 @@ sap.ui.define([
 
             const iElapsedMs = nowLocal.getTime() - startLocal.getTime();
             const iTotalSeconds = Math.round(iElapsedMs / 1000);
-            const fActualWorkHours = parseFloat((iTotalSeconds / 3600).toFixed(2));
+            const fActualWorkHours = parseFloat((iTotalSeconds / 3600).toFixed(1));
 
             try {
                 const oDialogModel = this.getView().getModel("dialog");
@@ -422,7 +465,7 @@ sap.ui.define([
             }
         },
 
-        /* --- Dialog Handling --- */
+
         openSubmitDialog: function () {
             if (!this.oSubmitDialog) {
                 Fragment.load({
@@ -446,9 +489,7 @@ sap.ui.define([
             this.saveEntryToDrafts();
         },
 
-        /* --- SUBMISSION LOGIC --- */
 
-        // 1. Triggered by "Submit" button in Dialog
         onSubmitConfirmation: async function () {
             const oDialogModel = this.getView().getModel("dialog");
             const oData = oDialogModel.getData();
@@ -460,7 +501,7 @@ sap.ui.define([
 
             this._setBusy(true);
 
-            // T = Final True, F = Final False
+
             const sFinalIndicator = oData.isFinalConfirmation ? "T" : "F";
             const sClockOutEditable = this._toCSTIsoString(oData.workFinishDate);
             const sClockLog = this._toCSTIsoString(oData.ClockOutTime);
@@ -476,16 +517,13 @@ sap.ui.define([
                 Arbeh: "HR"
             };
 
-            // Only update ClkOutLog if we are completing a running timer (context exists)
             if (oData.contextPath) {
                 oUpdatePayload.ClkOutLog = sClockLog + "Z";
             }
 
             try {
-                // STEP 1: Update DB. Capture ETag to skip re-reading later.
                 const sNextETag = await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, oUpdatePayload);
 
-                // STEP 2: Proceed to BAPI, passing the known ETag
                 this.postConfirmationToBAPI(oData, sNextETag);
 
             } catch (e) {
@@ -494,9 +532,9 @@ sap.ui.define([
             }
         },
 
-        // 2. Main Processing Chain
+
         postConfirmationToBAPI: async function (oData, sKnownETag) {
-            // Note: Busy is already true from onSubmitConfirmation
+
 
             if (this.oSubmitDialog) {
                 this.oSubmitDialog.close();
@@ -505,16 +543,12 @@ sap.ui.define([
             const sODataUrl = "/sap/opu/odata/sap/API_MAINTORDERCONFIRMATION/MaintOrderConfirmation";
 
             try {
-                // OPTIMIZATION: Use cached Personnel Number if available
+
                 let sPersonnelNumber = this._sPersonnelNumber;
 
                 if (!sPersonnelNumber) {
                     sPersonnelNumber = await this._fetchPersonnelNumber();
                 }
-
-                // CSRF Token is likely valid from previous calls, relying on _authenticatedFetch retry if needed
-
-                // --- A. PRIMARY CONFIRMATION ---
                 const oPrimaryPayload = this._buildConfirmationPayload(oData, sPersonnelNumber, false);
 
                 const responsePrimary = await fetch(sODataUrl, {
@@ -538,15 +572,12 @@ sap.ui.define([
                 const sCnfNo = resultPrimary.MaintOrderConf;
                 const sCnfCntr = resultPrimary.MaintOrderConfCntrValue;
 
-                // Stop UI Timer immediately for better UX
                 if (oData.contextPath) {
                     const oOrdersModel = this.getOwnerComponent().getModel("orders");
                     const oContext = oOrdersModel.createBindingContext(oData.contextPath);
                     this.stopSpecificTimer(oContext);
                 }
 
-                // --- B. UPDATE DB (Primary Done) ---
-                // Pass sKnownETag to skip GET. Capture new ETag for next step.
                 const sNextETag2 = await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
                     CnfNo: sCnfNo,
                     CnfCntr: sCnfCntr,
@@ -557,7 +588,6 @@ sap.ui.define([
                     Arbeh: "HR"
                 }, sKnownETag);
 
-                // --- C. OVERHEAD CONFIRMATION ---
                 try {
                     const oOverheadPayload = this._buildConfirmationPayload(oData, sPersonnelNumber, true);
 
@@ -580,8 +610,6 @@ sap.ui.define([
                     const responseDataOverhead = await responseOverhead.json();
                     const resultOverhead = responseDataOverhead.d || responseDataOverhead;
 
-                    // --- D. UPDATE DB (Completed) ---
-                    // Pass sNextETag2 to skip GET
                     await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
                         OcnfNo: resultOverhead.MaintOrderConf,
                         OcnfCntr: resultOverhead.MaintOrderConfCntrValue,
@@ -594,8 +622,6 @@ sap.ui.define([
                     });
 
                 } catch (overheadError) {
-                    // Overhead Failed: Update DB as OverheadError
-                    // Pass sNextETag2 to skip GET
                     await this.updateTimeEntryOnServerByUUID(oData.timeEntryId, {
                         Status: "OverheadError"
                     }, sNextETag2);
@@ -612,8 +638,6 @@ sap.ui.define([
                 this._setBusy(false);
             }
         },
-
-        // Helper to fetch and cache personnel number
         _fetchPersonnelNumber: async function () {
             if (this._sPersonnelNumber) return this._sPersonnelNumber;
 
@@ -632,8 +656,6 @@ sap.ui.define([
             this._sPersonnelNumber = data.employeenumber;
             return this._sPersonnelNumber;
         },
-
-        /* --- RETRY OVERHEAD --- */
         onPostOverheadFailure: async function (oEvent) {
             const oDraft = oEvent.getSource().getBindingContext("overheadFailures").getObject();
             this._setBusy(true);
@@ -644,7 +666,7 @@ sap.ui.define([
                     sPersonnelNumber = await this._fetchPersonnelNumber();
                 }
 
-                await this._refreshCsrfToken(); // Ensure token is fresh for manual retry
+                await this._refreshCsrfToken();
                 if (!this._sCsrfToken) throw new Error("Could not fetch CSRF Token");
 
                 const dStart = this._parseServerCSTToLocalDate(oDraft.ExecStartDate, oDraft.ExecStartTime);
@@ -705,9 +727,8 @@ sap.ui.define([
             }
         },
 
-        /* --- Update Custom HANA Table (With ETag Optimization) --- */
+
         updateTimeEntryOnServerByUUID: async function (sSapUUID, oAttributes, sKnownETag) {
-            // NOTE: We do not call _setBusy here as it is handled by the caller to prevent flicker
             const sEntryUrl = `${this.sHanaServiceUrl}(${encodeURIComponent(sSapUUID)})`;
 
             try {
@@ -715,7 +736,6 @@ sap.ui.define([
 
                 const oPayload = { ...oAttributes };
 
-                // Date formatting logic
                 if (oAttributes.workStartDate) {
                     const cst = this._toCSTIsoString(oAttributes.workStartDate);
                     oPayload.ExecStartDate = cst.slice(0, 10);
@@ -725,21 +745,16 @@ sap.ui.define([
                 if (oAttributes.workFinishDate) {
                     const cst = this._toCSTIsoString(oAttributes.workFinishDate);
                     oPayload.ExecFinDate = cst.slice(0, 10);
-                    oPayload.ExecFinTime = cst.slice(11, 19);
-                    // oPayload.ClkOutLog = oAttributes.workFinishDate.toISOString(); // Moved to caller for specific cases
-                    delete oPayload.workFinishDate;
+                    oPayload.ExecFinTime = cst.slice(11, 19); delete oPayload.workFinishDate;
                 }
 
                 let eTag = sKnownETag;
-
-                // If we don't have a known ETag, we MUST fetch it (Cost: 1 Network Call)
                 if (!eTag) {
                     const resHead = await this._authenticatedFetch(sEntryUrl, "GET");
                     const oData = await resHead.json();
                     eTag = resHead.headers.get("ETag") || (oData.d?.__metadata?.etag) || (oData['@odata.etag']);
                 }
 
-                // OPTIMIZATION: Return the response so we can grab the NEW ETag
                 const response = await fetch(sEntryUrl, {
                     method: "PATCH",
                     headers: {
@@ -755,8 +770,6 @@ sap.ui.define([
                     const txt = await response.text();
                     throw new Error(`DB Update Failed: ${txt}`);
                 }
-
-                // Return new ETag for chaining
                 return response.headers.get("ETag") || "*";
 
             } catch (e) {
@@ -764,8 +777,6 @@ sap.ui.define([
                 throw e;
             }
         },
-
-        /* --- Common Helpers (No changes to logic) --- */
 
         _authenticatedFetch: async function (url, method = "GET", body = null, isRetry = false) {
             const headers = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
@@ -837,41 +848,32 @@ sap.ui.define([
         loadOrdersAndTimeEntriesFiltered: async function (sOrderIdFilter) {
             this._setBusy(true);
             try {
+                const aAllEntries = await this._fetchAllUserTimeEntries();
+                const aActiveEntries = aAllEntries.filter(e => e.Status === "InProcess");
+
+                const aActiveOrders = await this._buildActiveOrdersFromHana(aActiveEntries);
+
                 let sFilter = "MaintOrderCreationDateTime gt datetimeoffset'2025-06-01T00:00:00Z' and MaintenanceOrderType eq 'EREF'";
-                if (sOrderIdFilter && sOrderIdFilter.length > 0) {
-                    sFilter += ` and substringof('${sOrderIdFilter}', MaintenanceOrder)`;
-                }
+                sFilter += ` and substringof('${sOrderIdFilter}', MaintenanceOrder)`;
+
                 const sUrl = `/sap/opu/odata/sap/API_MAINTENANCEORDER;v=2/MaintenanceOrder?$filter=${encodeURIComponent(sFilter)}&$expand=to_MaintenanceOrderOperation&$format=json`;
 
                 const response = await this._authenticatedFetch(sUrl);
-                const data = await response.json();
-                let aOrdersRaw = data.d ? data.d.results : [];
+                let aOrdersRaw = (await response.json()).d.results;
+                const aFilteredOrders = this._processOrders(aOrdersRaw);
 
-                aOrdersRaw = aOrdersRaw.filter(oOrder => {
-                    const bOrderMatches = oOrder.SystemStatusText && oOrder.SystemStatusText.startsWith("REL");
-                    if (bOrderMatches) {
-                        if (oOrder.to_MaintenanceOrderOperation && oOrder.to_MaintenanceOrderOperation.results) {
-                            oOrder.to_MaintenanceOrderOperation.results = oOrder.to_MaintenanceOrderOperation.results.filter(oOp => {
-                                return !oOp.SystemStatusText || !oOp.SystemStatusText.startsWith("CNF");
-                            });
-                        }
-                        return true;
-                    }
-                    return false;
-                });
+                this.getOwnerComponent().getModel("orders")
+                    .setProperty("/orders", [...aActiveOrders, ...aFilteredOrders]);
 
-                const aFlatOrders = this._processOrders(aOrdersRaw);
-                this.getOwnerComponent().getModel("orders").setProperty("/orders", aFlatOrders);
-                const aTimeEntries = await this.fetchActiveTimeEntries();
-                this.mergeTimeEntriesWithOrders(aTimeEntries);
-                this.startGlobalTimerInterval();
-                this.updatePanelVisibility();
+                this._updateActiveVisibilityKeys();
+
             } catch (err) {
                 MessageBox.error(err.message);
             } finally {
                 this._setBusy(false);
             }
         },
+
 
         onRefreshOrders: function () {
             MessageToast.show("Refreshing orders...");
@@ -940,21 +942,21 @@ sap.ui.define([
         },
 
         saveEntryToDrafts: async function () {
-            const sUserId = this.getCurrentUserId();
-            const sUrl = `${this.sHanaServiceUrl}?$filter=UserID eq '${sUserId}'&$format=json`;
+
             try {
-                const response = await this._authenticatedFetch(sUrl);
-                const data = await response.json();
-                const aAllResults = data.value || (data.d ? data.d.results : []);
+
+                const aAllResults = await this._fetchAllUserTimeEntries();
 
                 const processEntry = (item) => {
                     const dStart = this._parseServerCSTToLocalDate(item.ExecStartDate, item.ExecStartTime);
                     const dEnd = this._parseServerCSTToLocalDate(item.ExecFinDate, item.ExecFinTime);
+
                     if (dStart && dEnd) {
-                        const diff = (dEnd - dStart) / 1000;
-                        item.actualWorkHours = parseFloat((diff / 3600).toFixed(2));
-                        let h = Math.floor(diff / 3600);
-                        let m = Math.floor((diff % 3600) / 60);
+                        const diffSeconds = (dEnd - dStart) / 1000;
+                        item.actualWorkHours = parseFloat((diffSeconds / 3600).toFixed(1));
+
+                        let h = Math.floor(diffSeconds / 3600);
+                        let m = Math.floor((diffSeconds % 3600) / 60);
                         item.formattedTime = `${h}:${m < 10 ? '0' + m : m}`;
                     } else {
                         item.formattedTime = "--:--";
@@ -963,16 +965,24 @@ sap.ui.define([
                     return item;
                 };
 
-                const aErrorEntries = aAllResults.filter(item => item.Status === 'Error').map(processEntry);
-                const aOverheadErrorEntries = aAllResults.filter(item => item.Status === 'OverheadError').map(processEntry);
+                const aErrorEntries = aAllResults
+                    .filter(item => item.Status === "Error")
+                    .map(processEntry);
+
+                const aOverheadErrorEntries = aAllResults
+                    .filter(item => item.Status === "OverheadError")
+                    .map(processEntry);
 
                 this.getOwnerComponent().getModel("drafts").setProperty("/entries", aErrorEntries);
                 this.getOwnerComponent().getModel("overheadFailures").setProperty("/entries", aOverheadErrorEntries);
+
+                this._updateActiveVisibilityKeys();
 
             } catch (e) {
                 console.error("Failed to load drafts:", e);
             }
         },
+
 
         onPostDraft: async function (oEvent) {
             const oDraft = oEvent.getSource().getBindingContext("drafts").getObject();

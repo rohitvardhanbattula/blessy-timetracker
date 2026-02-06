@@ -25,7 +25,7 @@
                                         <VBox>
                                             <Title text="ACT: {drafts>OperationSo}" level="H4"/>
                                             <Text text="ORD: {path: 'drafts>OrderID', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
-                                            <Text text="Calculated Duration: {drafts>formattedTime}" class="cardSubtitle"/>
+                                            <Text text="Calculated Duration: {drafts>ActWrk}" class="cardSubtitle"/>
                                         </VBox>
                                     </HBox>
                                     <HBox>
@@ -80,9 +80,9 @@
                                         <HBox alignItems="Start">
                                             <core:Icon src="sap-icon://machine" size="1.5rem" class="sapUiMediumMarginEnd sapUiTinyMarginTop"/>
                                             <VBox>
-                                                <Title text="ACT: {orders>operationId} - {orders>assignedTo}" wrapping="true" level="H3"/>
+                                                <Title text="ACT: {orders>operationId} - {orders>operationDesc}" wrapping="true" level="H3"/>
                                                 <Text text="ORD: {path: 'orders>orderId', formatter: '.removeLeadingZeros'}" class="cardSubtitle"/>
-                                                <Text text="{orders>operationDesc}" wrapping="true" class="cardSubtitle"/>
+                                                <Text text="{orders>orderDesc}" wrapping="true" class="cardSubtitle"/>
                                             </VBox>
                                         </HBox>
                                         <VBox alignItems="End">
@@ -110,7 +110,8 @@
                     </headerToolbar>
                     <content>
                         <List id="ordersList" items="{orders>/orders}" noDataText="No open operations" showSeparators="None" backgroundDesign="Transparent" growing="true" growingThreshold="20" growingScrollToLoad="true">
-                            <CustomListItem type="Active" press=".onSelectOrder" visible="{= !${orders>timerState/isRunning} }">
+                            <CustomListItem type="Active" press=".onSelectOrder" visible="{= !${viewState>/activeKeys}.includes(${orders>orderId} + '-' + ${orders>operationId}) }">
+
                                 <VBox class="customCard">
                                     <FlexBox justifyContent="SpaceBetween" alignItems="Start">
                                         <HBox alignItems="Start">
@@ -131,22 +132,9 @@
                                             <Label text="Activity Type" />
                                             <Text text="{orders>activityType}" />
                                             <Label text="Earliest Start" />
-                                            <Text text="{
-    path: 'orders>reqStartDate',
-    type: 'sap.ui.model.type.DateTime',
-    formatOptions: {
-        style: 'medium'
-    }
-}" />
-
+                                            <Text text="{ path: 'orders>reqStartDate', type: 'sap.ui.model.type.DateTime', formatOptions: { style: 'medium' } }" />
                                             <Label text="Earliest Finish" />
-                                            <Text text="{
-    path: 'orders>reqEndDate',
-    type: 'sap.ui.model.type.DateTime',
-    formatOptions: {
-        style: 'medium'
-    }
-}" />
+                                            <Text text="{ path: 'orders>reqEndDate', type: 'sap.ui.model.type.DateTime', formatOptions: { style: 'medium' } }" />
                                         </f:SimpleForm>
 
                                         <VBox class="timer-container-inactive" alignItems="Center">
